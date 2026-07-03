@@ -12,7 +12,7 @@ pub fn main(init: std.process.Init) !u8 {
     var file_writer = std.Io.File.stdout().writerStreaming(io, &buf);
     var writer = &file_writer.interface;
 
-    // validate port number  TODO: move port validation and int cast to diff fn
+    // validate port number  TODO: move port validation and int cast to diff func
     const port_str = args.next() orelse {
         try writer.print("Usage $server [port]\n", .{});
         try writer.flush();

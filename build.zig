@@ -12,8 +12,10 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/server.zig"),
             .target = target,
+            .link_libc = true,
         }),
     });
+
     // Tell the build system to put the compiled binary in the `zig-out/bin` folder
     b.installArtifact(server_exe);
 
@@ -25,8 +27,10 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/client.zig"),
             .target = target,
+            .link_libc = true,
         }),
     });
+
     // Tell the build system to put the compiled binary in the `zig-out/bin` folder
     b.installArtifact(client_exe);
 
