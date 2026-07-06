@@ -2,21 +2,214 @@
 //! Zig Networking Library sits somewhere between directly using Libc and using std.Io.net
 
 const std = @import("std");
-const libc = @import("libc");
-
-const c = struct {
-    pub extern "c" fn accept(sockfd: c_int, addr: ?*libc.sockaddr, addrlen: ?*libc.socklen_t) c_int;
-    pub extern "c" fn bind(sockfd: c_int, addr: ?*const libc.sockaddr, addrlen: libc.socklen_t) c_int;
-    pub extern "c" fn listen(sockfd: c_int, backlog: c_int) c_int;
-    pub extern "c" fn setsockopt(socket: c_int, level: c_int, option_name: c_int, option_value: ?*const void, option_len: libc.socklen_t) c_int;
-    pub extern "c" fn socket(domain: c_int, sock_type: c_int, protocol: c_int) c_int;
-};
+const c = @import("libc");
 
 // Types
+pub const SocketLevel = enum(u32) {
+    socket = c.SOL_SOCKET,
+};
+
+pub const SocketOption = enum(u32) {
+    accept_connection = c.SO_ACCEPTCONN,
+    broadcast = c.SO_BROADCAST,
+    debug = c.SO_DEBUG,
+    dont_route = c.SO_DONTROUTE,
+    err = c.SO_ERROR,
+    keep_alive = c.SO_KEEPALIVE,
+    oob_inline = c.SO_OOBINLINE,
+    rcv_buffer = c.SO_RCVBUF,
+    rcv_low_watermark = c.SO_RCVLOWAT,
+    rcv_timeout = c.SO_RCVTIMEO,
+    reuse_address = c.SO_REUSEADDR,
+    snd_buffer = c.SO_SNDBUF,
+    snd_low_watermark = c.SO_SNDLOWAT,
+    snd_timeout = c.SO_SNDTIMEO,
+    socket_type = c.SO_TYPE,
+};
+
+pub const @"error" = error{
+    AccessDenied,
+    AddressFamilyNotSupported,
+    InvalidArguments,
+    TooManyFiles,
+    OutOfMemory,
+    ProtocolNotSupported,
+    Unexpected,
+};
+
+/// **Type** Supported socket domains
+pub const SocketDomain = enum(u32) {
+    Ipv4 = c.AF_INET,
+    Ipv6 = c.AF_INET6,
+};
+
+/// **Type** Supported socket types
+pub const SocketType = enum(u32) {
+    Stream = c.SOCK_STREAM,
+    Datagram = c.SOCK_DGRAM,
+};
 
 /// **Type** A Socket
 pub const Socket = struct {
     fd: u32,
+
+    /// Creates an endpoint for communication and returns a *Socket*
+    pub fn init(domain: SocketDomain, sock_type: SocketType, protocol: i32) !Socket {
+        const c_domain: c_int = @intCast(@intFromEnum(domain));
+        const c_sock_type: c_int = @intCast(@intFromEnum(sock_type));
+        const c_protocol: c_int = @intCast(protocol);
+
+        const c_fd = c.socket(c_domain, c_sock_type, c_protocol);
+
+        if (c_fd == -1) {
+            const errno = std.c._errno().*;
+
+            return switch (errno) {
+                c.EACCES => error.AccessDenied,
+                c.EAFNOSUPPORT => error.AddressFamilyNotSupported,
+                c.EINVAL => error.InvalidArguments,
+                c.EMFILE => error.TooManyFiles,
+                c.ENFILE => error.OutOfMemory,
+                c.EPROTONOSUPPORT => error.ProtocolNotSupported,
+                else => error.Unexpected,
+            };
+        }
+
+        return .{
+            .fd = @intCast(c_fd),
+        };
+    }
+
+    /// Accepts a connection on the provided socket and saves the address
+    /// of the new connection to address
+    pub fn accept(self: Socket, address: *Address) !Socket {
+        const c_sockfd: c_int = @intCast(self.fd);
+
+        // create c address struct
+        var c_address: c.sockaddr_storage = undefined;
+        var c_address_len: u32 = @sizeOf(c.sockaddr_storage);
+
+        const fd = c.accept(c_sockfd, @ptrCast(&c_address), &c_address_len);
+
+        if (fd == -1) {
+            const errno = std.c._errno().*;
+
+            return switch (errno) {
+                c.EWOULDBLOCK => error.WouldBlock,
+                c.EBADF => error.NotAFileDescriptor,
+                c.ECONNABORTED => error.ConnectionAborted,
+                c.EFAULT => error.NotWriteableMemory,
+                c.EINTR => error.Interrupted,
+                c.EINVAL => error.InvalidArguments,
+                c.EMFILE => error.TooManyFiles,
+                c.ENFILE => error.TooManyFiles,
+                c.ENOBUFS => error.OutOfMemory,
+                c.ENOMEM => error.OutOfMemory,
+                c.ENOTSOCK => error.NotASocket,
+                c.EOPNOTSUPP => error.OperationNotSupported,
+                c.EPERM => error.FirewallDenied,
+                c.EPROTO => error.ProtocolError,
+                else => error.Unexpected,
+            };
+        }
+
+        packAddress(&c_address, address);
+
+        return .{
+            .fd = @intCast(fd),
+        };
+    }
+
+    /// Binds the provided socket to the provided address
+    pub fn bind(self: Socket, address: Address) !void {
+        const c_sockfd: c_int = @intCast(self.fd);
+
+        // create c address struct
+        var c_address: c.sockaddr_storage = undefined;
+        var c_address_len: u32 = undefined;
+
+        unpackAddress(address, @ptrCast(&c_address), &c_address_len);
+
+        const result = c.bind(c_sockfd, @ptrCast(&c_address), c_address_len);
+
+        if (result == -1) {
+            const errno = std.c._errno().*;
+
+            return switch (errno) {
+                c.EACCES => error.AccessDenied,
+                c.EADDRINUSE => error.AddressInUse,
+                c.EBADF => error.NotAFileDescriptor,
+                c.EINVAL => error.InvalidArguments,
+                c.ENOTSOCK => error.NotASocket,
+                c.EADDRNOTAVAIL => error.AddressNotAvailable,
+                else => error.Unexpected,
+            };
+        }
+    }
+
+    /// Marks the provided socket as a passive listening socket for connections
+    /// to be accepted using *accept()*
+    pub fn listen(self: Socket, backlog: i32) !void {
+        const c_sockfd: c_int = @intCast(self.fd);
+        const c_backlog: c_int = @intCast(backlog);
+
+        const result = c.listen(c_sockfd, c_backlog);
+
+        if (result == -1) {
+            const errno = std.c._errno().*;
+
+            return switch (errno) {
+                c.EADDRINUSE => error.AddressInUse,
+                c.EBADF => error.NotAFileDescriptor,
+                c.ENOTSOCK => error.NotASocket,
+                c.EOPNOTSUPP => error.OperationNotSupported,
+                else => error.Unexpected,
+            };
+        }
+    }
+
+    // TODO: needs to be actually implemented - refer to $man socket 7
+    pub fn setsockopt(self: Socket, level: SocketLevel, option_name: SocketOption, option_value: ?*const void, option_len: u32) !u32 {
+        const c_sockfd: c_int = @intCast(self.fd);
+        const c_level: c_int = @intCast(@intFromEnum(level));
+        const c_option_name: c_int = @intCast(@intFromEnum(option_name));
+        const c_option_len: u32 = @intCast(option_len);
+
+        const result = c.setsockopt(c_sockfd, c_level, c_option_name, option_value, c_option_len);
+
+        if (result == -1) {
+            const errno = std.c._errno().*;
+
+            return switch (errno) {
+                c.EBADF => error.NotAFileDescriptor,
+                c.EDOM => error.TimeoutTooBig,
+                c.EINVAL => error.InvalidArguments,
+                c.EISCONN => error.AlreadyConnected,
+                c.ENOPROTOOPT => error.OptionNotSupported,
+                c.ENOTSOCK => error.NotASocket,
+                c.ENOMEM => error.OutOfMemory,
+                c.ENOBUFS => error.InsufficientResources,
+                else => error.Unexpected,
+            };
+        }
+
+        return @intCast(result);
+    }
+
+    // might remove later
+    pub fn writeAll(self: Socket, message: []const u8) !void {
+        var pos: u64 = 0;
+
+        while (pos < message.len) {
+            const bytes_written = try write(self.fd, message[pos..]);
+
+            if (bytes_written == 0) {
+                return error.ConnectionClosed;
+            }
+
+            pos += bytes_written;
+        }
+    }
 
     pub fn deinit(self: Socket) void {
         _ = std.c.close(@intCast(self.fd));
@@ -72,7 +265,7 @@ pub const Ip4Address = struct {
             return error.ParseError;
         }
 
-        const result = libc.inet_pton(libc.AF_INET, new_address.ptr, &self.addr);
+        const result = c.inet_pton(c.AF_INET, new_address.ptr, &self.addr);
         if (result == 0 or result == -1) {
             return error.ParseError;
         }
@@ -114,7 +307,7 @@ pub const Ip6Address = struct {
             return error.ParseError;
         }
 
-        const result = libc.inet_pton(libc.AF_INET6, new_address.ptr, &self.addr);
+        const result = c.inet_pton(c.AF_INET6, new_address.ptr, &self.addr);
         if (result == 0 or result == -1) {
             return error.ParseError;
         }
@@ -125,39 +318,39 @@ pub const Ip6Address = struct {
 
 /// unpacks an *Address* into a C *sockaddr_storage* struct
 /// & sets the length ptr to the length of the specific c address struct
-fn unpackAddress(address: Address, storage: *libc.sockaddr_storage, length: *u32) void {
+fn unpackAddress(address: Address, storage: *c.sockaddr_storage, length: *u32) void {
     switch (address) {
         .ip4 => {
-            const c_address_ip4: *libc.sockaddr_in = @ptrCast(@alignCast(storage));
-            c_address_ip4.*.sin_family = libc.AF_INET;
+            const c_address_ip4: *c.sockaddr_in = @ptrCast(@alignCast(storage));
+            c_address_ip4.*.sin_family = c.AF_INET;
             c_address_ip4.*.sin_port = address.ip4.port;
             c_address_ip4.*.sin_addr.s_addr = address.ip4.addr;
-            length.* = @sizeOf(libc.sockaddr_in);
+            length.* = @sizeOf(c.sockaddr_in);
         },
         .ip6 => {
-            const c_address_ip6: *libc.sockaddr_in6 = @ptrCast(@alignCast(storage));
-            c_address_ip6.*.sin6_family = libc.AF_INET6;
+            const c_address_ip6: *c.sockaddr_in6 = @ptrCast(@alignCast(storage));
+            c_address_ip6.*.sin6_family = c.AF_INET6;
             c_address_ip6.*.sin6_port = address.ip6.port;
             c_address_ip6.*.sin6_flowinfo = address.ip6.flow_info;
             c_address_ip6.*.sin6_addr = @bitCast(address.ip6.addr);
             c_address_ip6.*.sin6_scope_id = address.ip6.scope_id;
-            length.* = @sizeOf(libc.sockaddr_in6);
+            length.* = @sizeOf(c.sockaddr_in6);
         },
     }
 }
 
 /// packs a C *sockaddr_storage* struct into an *Address*
-fn packAddress(storage: *libc.sockaddr_storage, address: *Address) void {
+fn packAddress(storage: *c.sockaddr_storage, address: *Address) void {
     switch (storage.ss_family) {
-        libc.AF_INET => {
-            const addr_ip4: *libc.sockaddr_in = @ptrCast(@alignCast(storage));
+        c.AF_INET => {
+            const addr_ip4: *c.sockaddr_in = @ptrCast(@alignCast(storage));
             address.* = .{ .ip4 = .{
                 .addr = addr_ip4.sin_addr.s_addr,
                 .port = addr_ip4.sin_port,
             } };
         },
-        libc.AF_INET6 => {
-            const addr_ip6: *libc.sockaddr_in6 = @ptrCast(@alignCast(storage));
+        c.AF_INET6 => {
+            const addr_ip6: *c.sockaddr_in6 = @ptrCast(@alignCast(storage));
             address.* = .{ .ip6 = .{
                 .addr = @bitCast(addr_ip6.sin6_addr),
                 .flow_info = addr_ip6.sin6_flowinfo,
@@ -169,242 +362,28 @@ fn packAddress(storage: *libc.sockaddr_storage, address: *Address) void {
     }
 }
 
-// Library Functions
+fn write(fd: u32, buffer: []const u8) !u64 {
+    const bytes_written = c.write(@intCast(fd), buffer.ptr, buffer.len);
 
-// Accept
-pub const AcceptError = error{
-    WouldBlock,
-    NotAFileDescriptor,
-    ConnectionAborted,
-    NotWriteableMemory,
-    Interrupted,
-    InvalidArguments,
-    TooManyFiles,
-    OutOfMemory,
-    NotASocket,
-    OperationNotSupported,
-    FirewallDenied,
-    ProtocolError,
-    Unexpected,
-};
-
-/// Accepts a connection on the provided socket and saves the address
-/// of the new connection to address
-pub fn accept(sock: Socket, address: *Address) AcceptError!Socket {
-    const c_sockfd: c_int = @intCast(sock.fd);
-
-    // create c address struct
-    var c_address: libc.sockaddr_storage = undefined;
-    var c_address_len: u32 = @sizeOf(libc.sockaddr_storage);
-
-    const fd = c.accept(c_sockfd, @ptrCast(&c_address), &c_address_len);
-
-    if (fd == -1) {
+    if (bytes_written == -1) {
         const errno = std.c._errno().*;
 
         return switch (errno) {
-            libc.EWOULDBLOCK => AcceptError.WouldBlock,
-            libc.EBADF => AcceptError.NotAFileDescriptor,
-            libc.ECONNABORTED => AcceptError.ConnectionAborted,
-            libc.EFAULT => AcceptError.NotWriteableMemory,
-            libc.EINTR => AcceptError.Interrupted,
-            libc.EINVAL => AcceptError.InvalidArguments,
-            libc.EMFILE => AcceptError.TooManyFiles,
-            libc.ENFILE => AcceptError.TooManyFiles,
-            libc.ENOBUFS => AcceptError.OutOfMemory,
-            libc.ENOMEM => AcceptError.OutOfMemory,
-            libc.ENOTSOCK => AcceptError.NotASocket,
-            libc.EOPNOTSUPP => AcceptError.OperationNotSupported,
-            libc.EPERM => AcceptError.FirewallDenied,
-            libc.EPROTO => AcceptError.ProtocolError,
-            else => AcceptError.Unexpected,
+            c.EAGAIN => error.WouldBlock,
+            c.EBADF => error.NotAFileDescriptor,
+            c.EDESTADDRREQ => error.SocketAddressNotSet,
+            c.EDQUOT => error.DataQuota,
+            c.EFAULT => error.MemoryFault,
+            c.EFBIG => error.FileTooBig,
+            c.EINTR => error.Interrupted,
+            c.EINVAL => error.InvalidArguments,
+            c.EIO => error.IOError,
+            c.ENOSPC => error.NoSpace,
+            c.EPERM => error.NoPermission,
+            c.EPIPE => error.ConnectionClosed,
+            else => error.Unexpected,
         };
     }
 
-    packAddress(&c_address, address);
-
-    return .{
-        .fd = @intCast(fd),
-    };
-}
-
-// Bind
-pub const BindError = error{
-    AccessDenied,
-    AddressInUse,
-    NotAFileDescriptor,
-    InvalidArguments,
-    NotASocket,
-    AddressNotAvailable,
-    Unexpected,
-};
-
-/// Binds the provided socket to the provided address
-pub fn bind(sock: Socket, address: Address) BindError!void {
-    const c_sockfd: c_int = @intCast(sock.fd);
-
-    // create c address struct
-    var c_address: libc.sockaddr_storage = undefined;
-    var c_address_len: u32 = undefined;
-
-    unpackAddress(address, @ptrCast(&c_address), &c_address_len);
-
-    const result = c.bind(c_sockfd, @ptrCast(&c_address), c_address_len);
-
-    if (result == -1) {
-        const errno = std.c._errno().*;
-
-        return switch (errno) {
-            libc.EACCES => BindError.AccessDenied,
-            libc.EADDRINUSE => BindError.AddressInUse,
-            libc.EBADF => BindError.NotAFileDescriptor,
-            libc.EINVAL => BindError.InvalidArguments,
-            libc.ENOTSOCK => BindError.NotASocket,
-            libc.EADDRNOTAVAIL => BindError.AddressNotAvailable,
-            else => BindError.Unexpected,
-        };
-    }
-}
-
-// Listen
-pub const ListenError = error{
-    AddressInUse,
-    NotAFileDescriptor,
-    NotASocket,
-    OperationNotSupported,
-    Unexpected,
-};
-
-/// Marks the provided socket as a passive listening socket for connections
-/// to be accepted using *accept()*
-pub fn listen(sock: Socket, backlog: i32) ListenError!void {
-    const c_sockfd: c_int = @intCast(sock.fd);
-    const c_backlog: c_int = @intCast(backlog);
-
-    const result = c.listen(c_sockfd, c_backlog);
-
-    if (result == -1) {
-        const errno = std.c._errno().*;
-
-        return switch (errno) {
-            libc.EADDRINUSE => ListenError.AddressInUse,
-            libc.EBADF => ListenError.NotAFileDescriptor,
-            libc.ENOTSOCK => ListenError.NotASocket,
-            libc.EOPNOTSUPP => ListenError.OperationNotSupported,
-            else => ListenError.Unexpected,
-        };
-    }
-}
-
-// Setsockopt
-pub const SetsockoptError = error{
-    NotAFileDescriptor,
-    TimeoutTooBig,
-    InvalidArguments,
-    AlreadyConnected,
-    OptionNotSupported,
-    NotASocket,
-    OutOfMemory,
-    InsufficientResources,
-    Unexpected,
-};
-
-pub const SocketLevel = enum(u32) {
-    socket = libc.SOL_SOCKET,
-};
-
-pub const SocketOption = enum(u32) {
-    accept_connection = libc.SO_ACCEPTCONN,
-    broadcast = libc.SO_BROADCAST,
-    debug = libc.SO_DEBUG,
-    dont_route = libc.SO_DONTROUTE,
-    err = libc.SO_ERROR,
-    keep_alive = libc.SO_KEEPALIVE,
-    oob_inline = libc.SO_OOBINLINE,
-    rcv_buffer = libc.SO_RCVBUF,
-    rcv_low_watermark = libc.SO_RCVLOWAT,
-    rcv_timeout = libc.SO_RCVTIMEO,
-    reuse_address = libc.SO_REUSEADDR,
-    snd_buffer = libc.SO_SNDBUF,
-    snd_low_watermark = libc.SO_SNDLOWAT,
-    snd_timeout = libc.SO_SNDTIMEO,
-    socket_type = libc.SO_TYPE,
-};
-
-// TODO: needs to be actually implemented - refer to $man socket 7
-pub fn setsockopt(sock: Socket, level: SocketLevel, option_name: SocketOption, option_value: ?*const void, option_len: u32) SetsockoptError!u32 {
-    const c_sockfd: c_int = @intCast(sock.fd);
-    const c_level: c_int = @intCast(@intFromEnum(level));
-    const c_option_name: c_int = @intCast(@intFromEnum(option_name));
-    const c_option_len: u32 = @intCast(option_len);
-
-    const result = c.setsockopt(c_sockfd, c_level, c_option_name, option_value, c_option_len);
-
-    if (result == -1) {
-        const errno = std.c._errno().*;
-
-        return switch (errno) {
-            libc.EBADF => SetsockoptError.NotAFileDescriptor,
-            libc.EDOM => SetsockoptError.TimeoutTooBig,
-            libc.EINVAL => SetsockoptError.InvalidArguments,
-            libc.EISCONN => SetsockoptError.AlreadyConnected,
-            libc.ENOPROTOOPT => SetsockoptError.OptionNotSupported,
-            libc.ENOTSOCK => SetsockoptError.NotASocket,
-            libc.ENOMEM => SetsockoptError.OutOfMemory,
-            libc.ENOBUFS => SetsockoptError.InsufficientResources,
-            else => SetsockoptError.Unexpected,
-        };
-    }
-
-    return @intCast(result);
-}
-
-// Socket
-pub const SocketError = error{
-    AccessDenied,
-    AddressFamilyNotSupported,
-    InvalidArguments,
-    TooManyFiles,
-    OutOfMemory,
-    ProtocolNotSupported,
-    Unexpected,
-};
-
-/// **Type** Supported socket domains
-pub const SocketDomain = enum(u32) {
-    Ipv4 = libc.AF_INET,
-    Ipv6 = libc.AF_INET6,
-};
-
-/// **Type** Supported socket types
-pub const SocketType = enum(u32) {
-    Stream = libc.SOCK_STREAM,
-    Datagram = libc.SOCK_DGRAM,
-};
-
-/// Creates an endpoint for communication and returns a *Socket*
-pub fn socket(domain: SocketDomain, sock_type: SocketType, protocol: i32) SocketError!Socket {
-    const c_domain: c_int = @intCast(@intFromEnum(domain));
-    const c_sock_type: c_int = @intCast(@intFromEnum(sock_type));
-    const c_protocol: c_int = @intCast(protocol);
-
-    const c_fd = c.socket(c_domain, c_sock_type, c_protocol);
-
-    if (c_fd == -1) {
-        const errno = std.c._errno().*;
-
-        return switch (errno) {
-            libc.EACCES => SocketError.AccessDenied,
-            libc.EAFNOSUPPORT => SocketError.AddressFamilyNotSupported,
-            libc.EINVAL => SocketError.InvalidArguments,
-            libc.EMFILE => SocketError.TooManyFiles,
-            libc.ENFILE => SocketError.OutOfMemory,
-            libc.EPROTONOSUPPORT => SocketError.ProtocolNotSupported,
-            else => SocketError.Unexpected,
-        };
-    }
-
-    return .{
-        .fd = @intCast(c_fd),
-    };
+    return @intCast(bytes_written);
 }

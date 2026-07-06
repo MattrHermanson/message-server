@@ -33,7 +33,7 @@ pub fn main(init: std.process.Init) !u8 {
         return 1;
     };
 
-    const listener = try net.socket(
+    const listener = try net.Socket.init(
         net.SocketDomain.Ipv4,
         net.SocketType.Stream,
         0,
@@ -43,8 +43,7 @@ pub fn main(init: std.process.Init) !u8 {
 
     // set socket options
     const reuse: i32 = 1;
-    _ = try net.setsockopt(
-        listener,
+    _ = try listener.setsockopt(
         net.SocketLevel.socket,
         net.SocketOption.reuse_address,
         @ptrCast(&reuse),
@@ -56,21 +55,26 @@ pub fn main(init: std.process.Init) !u8 {
         return 1;
     };
 
-    try net.bind(listener, address);
+    try listener.bind(address);
 
-    try net.listen(listener, 128);
+    try listener.listen(128);
 
     while (true) {
         var conn_address: net.Address = undefined;
 
-        const socket = net.accept(listener, &conn_address) catch |err| {
+        const socket = listener.accept(&conn_address) catch |err| {
             std.debug.print("error accept: {}\n", .{err});
             continue;
         };
 
         defer socket.deinit();
 
-        // write to socket
+        try socket.writeAll("Hi from over the Network\n");
+
+        // TODO:
+        // 1. look at the part in the article about message boundaries
+        // 2. decide where to put write functions (either in net or somewhere else)
+        // 3. decide whether to implement kqueue or chat messager first
     }
 
     return 0;
