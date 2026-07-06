@@ -3,6 +3,23 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     // 1. Standard options for target (OS/Architecture) and optimization (Debug/Release)
     const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+
+    const translate_c = b.addTranslateC(.{
+        .root_source_file = b.path("src/net/c.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const net_module = b.createModule(.{
+        .root_source_file = b.path("src/net/net.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
+    // Extracted from inline array to avoid pointer issues
+    net_module.addImport("libc", translate_c.createModule());
 
     // ==========================================
     // Server Configuration
@@ -15,6 +32,8 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
+
+    server_exe.root_module.addImport("net", net_module);
 
     // Tell the build system to put the compiled binary in the `zig-out/bin` folder
     b.installArtifact(server_exe);
@@ -30,6 +49,8 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
+
+    client_exe.root_module.addImport("net", net_module);
 
     // Tell the build system to put the compiled binary in the `zig-out/bin` folder
     b.installArtifact(client_exe);

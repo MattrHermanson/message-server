@@ -1,3 +1,4 @@
+//! Matt Hermanson - 2026
 //! Kqueue wrapper that manages an internal events buffer
 
 const std = @import("std");

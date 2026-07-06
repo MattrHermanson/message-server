@@ -1,22 +1,14 @@
+//! Matt Hermanson - 2026
+//! Zig Networking Library sits somewhere between directly using Libc and using std.Io.net
+
 const std = @import("std");
-
-const libc = @cImport({
-    @cInclude("errno.h");
-    @cInclude("sys/socket.h");
-    @cInclude("netinet/in.h");
-});
-
-// IDEAS:
-//  - [ ] socket type that has read only values with the current flags
-//  - [ ] address type that w/ len inside, remove len from params
-//  - [ ] enums for all options, protocols, etc
-//  - [ ] switch pointer/length pairs for byte slices
+const libc = @import("libc");
 
 const c = struct {
     pub extern "c" fn accept(sockfd: c_int, addr: ?*libc.sockaddr, addrlen: ?*libc.socklen_t) c_int;
     pub extern "c" fn bind(sockfd: c_int, addr: ?*const libc.sockaddr, addrlen: libc.socklen_t) c_int;
     pub extern "c" fn listen(sockfd: c_int, backlog: c_int) c_int;
-    pub extern "c" fn setsockopt(socket: c_int, level: c_int, option_name: c_int, option_value: ?*const void, option_len: socklen_t) c_int;
+    pub extern "c" fn setsockopt(socket: c_int, level: c_int, option_name: c_int, option_value: ?*const void, option_len: libc.socklen_t) c_int;
     pub extern "c" fn socket(domain: c_int, sock_type: c_int, protocol: c_int) c_int;
 };
 
@@ -25,12 +17,26 @@ const c = struct {
 /// **Type** A Socket
 pub const Socket = struct {
     fd: u32,
+
+    pub fn deinit(self: Socket) void {
+        _ = std.c.close(@intCast(self.fd));
+    }
 };
 
 /// **Type** Generic Address that holds either *Ip4Address* or *Ip6Address*
 pub const Address = union(enum) {
     ip4: Ip4Address,
     ip6: Ip6Address,
+
+    pub fn initIp4WithString(port: u16, address: []const u8) !Address {
+        const ip4 = try Ip4Address.initWithString(port, address);
+        return .{ .ip4 = ip4 };
+    }
+
+    pub fn initIp6WithString(port: u16, address: []const u8) !Address {
+        const ip6 = try Ip6Address.initWithString(port, address);
+        return .{ .ip6 = ip6 };
+    }
 };
 
 /// **Type** An Ipv4 address
@@ -38,13 +44,38 @@ pub const Ip4Address = struct {
     port: u16,
     addr: u32,
 
+    pub fn init(port: u16, address: u32) Ip4Address {
+        var ip4: Ip4Address = .{};
+        ip4.setPort(port);
+        ip4.setAddress(address);
+        return ip4;
+    }
+
+    pub fn initWithString(port: u16, address: []const u8) !Ip4Address {
+        var ip4: Ip4Address = undefined;
+        ip4.setPort(port);
+        try ip4.setAddressWithString(address);
+        return ip4;
+    }
+
     /// **DO NOT** set port and addr directly unless converting to network byte-order
-    pub fn setPort(self: Ip4Address, new_port: u16) void {
+    pub fn setPort(self: *Ip4Address, new_port: u16) void {
         self.port = std.mem.nativeToBig(u16, new_port);
     }
 
-    pub fn setAddress(self: Ip4Address, new_address: u32) void {
+    pub fn setAddress(self: *Ip4Address, new_address: u32) void {
         self.addr = std.mem.nativeToBig(u32, new_address);
+    }
+
+    pub fn setAddressWithString(self: *Ip4Address, new_address: []const u8) error{ParseError}!void {
+        if (new_address.len < 8 or new_address.len > 17) {
+            return error.ParseError;
+        }
+
+        const result = libc.inet_pton(libc.AF_INET, new_address.ptr, &self.addr);
+        if (result == 0 or result == -1) {
+            return error.ParseError;
+        }
     }
 };
 
@@ -55,13 +86,38 @@ pub const Ip6Address = struct {
     addr: u128,
     scope_id: u32,
 
+    pub fn init(port: u16, address: u128) Ip6Address {
+        var ip6: Ip6Address = .{};
+        ip6.setPort(port);
+        ip6.setAddress(address);
+        return ip6;
+    }
+
+    pub fn initWithString(port: u16, address: []const u8) !Ip6Address {
+        var ip6: Ip6Address = .{};
+        ip6.setPort(port);
+        try ip6.setAddressWithString(address);
+        return ip6;
+    }
+
     /// **DO NOT** set port and addr directly unless converting to network byte-order
-    pub fn setPort(self: Ip6Address, new_port: u16) void {
+    pub fn setPort(self: *Ip6Address, new_port: u16) void {
         self.port = std.mem.nativeToBig(u16, new_port);
     }
 
-    pub fn setAddress(self: Ip6Address, new_address: u128) void {
+    pub fn setAddress(self: *Ip6Address, new_address: u128) void {
         self.addr = std.mem.nativeToBig(u128, new_address);
+    }
+
+    pub fn setAddressWithString(self: *Ip6Address, new_address: []const u8) void {
+        if (new_address.len < 3 or new_address.len > 46) {
+            return error.ParseError;
+        }
+
+        const result = libc.inet_pton(libc.AF_INET6, new_address.ptr, &self.addr);
+        if (result == 0 or result == -1) {
+            return error.ParseError;
+        }
     }
 };
 
@@ -75,7 +131,7 @@ fn unpackAddress(address: Address, storage: *libc.sockaddr_storage, length: *u32
             const c_address_ip4: *libc.sockaddr_in = @ptrCast(@alignCast(storage));
             c_address_ip4.*.sin_family = libc.AF_INET;
             c_address_ip4.*.sin_port = address.ip4.port;
-            c_address_ip4.*.sin_addr = address.ip4.addr;
+            c_address_ip4.*.sin_addr.s_addr = address.ip4.addr;
             length.* = @sizeOf(libc.sockaddr_in);
         },
         .ip6 => {
@@ -83,8 +139,8 @@ fn unpackAddress(address: Address, storage: *libc.sockaddr_storage, length: *u32
             c_address_ip6.*.sin6_family = libc.AF_INET6;
             c_address_ip6.*.sin6_port = address.ip6.port;
             c_address_ip6.*.sin6_flowinfo = address.ip6.flow_info;
-            c_address_ip6.*.sin6_addr = address.ip6.addr;
-            c_address_ip6.*.sin6_addr = address.ip6.addr;
+            c_address_ip6.*.sin6_addr = @bitCast(address.ip6.addr);
+            c_address_ip6.*.sin6_scope_id = address.ip6.scope_id;
             length.* = @sizeOf(libc.sockaddr_in6);
         },
     }
@@ -96,14 +152,14 @@ fn packAddress(storage: *libc.sockaddr_storage, address: *Address) void {
         libc.AF_INET => {
             const addr_ip4: *libc.sockaddr_in = @ptrCast(@alignCast(storage));
             address.* = .{ .ip4 = .{
-                .addr = addr_ip4.sin_addr,
+                .addr = addr_ip4.sin_addr.s_addr,
                 .port = addr_ip4.sin_port,
             } };
         },
         libc.AF_INET6 => {
             const addr_ip6: *libc.sockaddr_in6 = @ptrCast(@alignCast(storage));
             address.* = .{ .ip6 = .{
-                .addr = addr_ip6.sin6_addr,
+                .addr = @bitCast(addr_ip6.sin6_addr),
                 .flow_info = addr_ip6.sin6_flowinfo,
                 .port = addr_ip6.sin6_port,
                 .scope_id = addr_ip6.sin6_scope_id,
@@ -141,14 +197,13 @@ pub fn accept(sock: Socket, address: *Address) AcceptError!Socket {
     var c_address: libc.sockaddr_storage = undefined;
     var c_address_len: u32 = @sizeOf(libc.sockaddr_storage);
 
-    const fd = c.accept(c_sockfd, &c_address, &c_address_len);
+    const fd = c.accept(c_sockfd, @ptrCast(&c_address), &c_address_len);
 
     if (fd == -1) {
         const errno = std.c._errno().*;
 
         return switch (errno) {
             libc.EWOULDBLOCK => AcceptError.WouldBlock,
-            libc.EAGAIN => AcceptError.WouldBlock,
             libc.EBADF => AcceptError.NotAFileDescriptor,
             libc.ECONNABORTED => AcceptError.ConnectionAborted,
             libc.EFAULT => AcceptError.NotWriteableMemory,
@@ -166,7 +221,7 @@ pub fn accept(sock: Socket, address: *Address) AcceptError!Socket {
         };
     }
 
-    packAddress(c_address, address);
+    packAddress(&c_address, address);
 
     return .{
         .fd = @intCast(fd),
@@ -192,9 +247,9 @@ pub fn bind(sock: Socket, address: Address) BindError!void {
     var c_address: libc.sockaddr_storage = undefined;
     var c_address_len: u32 = undefined;
 
-    unpackAddress(address, &c_address, &c_address_len);
+    unpackAddress(address, @ptrCast(&c_address), &c_address_len);
 
-    const result = c.bind(c_sockfd, c_address, c_address_len);
+    const result = c.bind(c_sockfd, @ptrCast(&c_address), c_address_len);
 
     if (result == -1) {
         const errno = std.c._errno().*;
@@ -265,7 +320,6 @@ pub const SocketOption = enum(u32) {
     dont_route = libc.SO_DONTROUTE,
     err = libc.SO_ERROR,
     keep_alive = libc.SO_KEEPALIVE,
-    linger = libc.Linger,
     oob_inline = libc.SO_OOBINLINE,
     rcv_buffer = libc.SO_RCVBUF,
     rcv_low_watermark = libc.SO_RCVLOWAT,
@@ -280,8 +334,8 @@ pub const SocketOption = enum(u32) {
 // TODO: needs to be actually implemented - refer to $man socket 7
 pub fn setsockopt(sock: Socket, level: SocketLevel, option_name: SocketOption, option_value: ?*const void, option_len: u32) SetsockoptError!u32 {
     const c_sockfd: c_int = @intCast(sock.fd);
-    const c_level: c_int = @intCast(level);
-    const c_option_name: c_int = @intCast(option_name);
+    const c_level: c_int = @intCast(@intFromEnum(level));
+    const c_option_name: c_int = @intCast(@intFromEnum(option_name));
     const c_option_len: u32 = @intCast(option_len);
 
     const result = c.setsockopt(c_sockfd, c_level, c_option_name, option_value, c_option_len);
@@ -302,7 +356,7 @@ pub fn setsockopt(sock: Socket, level: SocketLevel, option_name: SocketOption, o
         };
     }
 
-    return result;
+    return @intCast(result);
 }
 
 // Socket

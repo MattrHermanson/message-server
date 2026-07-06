@@ -1,5 +1,5 @@
 const std = @import("std");
-const net = @import("utils/net.zig");
+const net = @import("net");
 
 pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
@@ -12,29 +12,26 @@ pub fn main(init: std.process.Init) !u8 {
     var file_writer = std.Io.File.stdout().writerStreaming(io, &buf);
     var writer = &file_writer.interface;
 
-    // validate port number  TODO: move port validation and int cast to diff func
+    // validate port number
     const port_str = args.next() orelse {
         try writer.print("Usage $server [port]\n", .{});
         try writer.flush();
         return 1;
     };
 
-    // parse string to u16
-    const port = std.fmt.parseInt(u16, port_str, 10) catch {
-        try writer.print("Invalid Port Number\n", .{});
-        try writer.flush();
+    const port = validate_port(port_str) catch |err| {
+        switch (err) {
+            PortError.InvalidNumber => {
+                try writer.print("Invalid Port Number\n", .{});
+                try writer.flush();
+            },
+            PortError.WellKnownPort => {
+                try writer.print("Invalid Port Number. Cannot use a well-known port\n", .{});
+                try writer.flush();
+            },
+        }
         return 1;
     };
-
-    // validate well-known ports
-    if (port < 1024) {
-        try writer.print("Invalid Port Number. Cannot use a well-known port\n", .{});
-        try writer.flush();
-        return 1;
-    }
-
-    // FIX: remove std.Io.net dependency
-    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", std.mem.nativeToBig(u16, port));
 
     const listener = try net.socket(
         net.SocketDomain.Ipv4,
@@ -42,42 +39,60 @@ pub fn main(init: std.process.Init) !u8 {
         0,
     );
 
-    defer _ = std.c.close(listener);
+    defer listener.deinit();
 
     // set socket options
-    const reuse: c_int = 1;
-    try net.setsockopt(
+    const reuse: i32 = 1;
+    _ = try net.setsockopt(
         listener,
         net.SocketLevel.socket,
         net.SocketOption.reuse_address,
         @ptrCast(&reuse),
-        @sizeOf(c_int),
+        @sizeOf(i32),
     );
 
-    // TODO: fill this with real values
-    const address: net.Address = .{ .ip4 = .{
-        .addr = 1234,
-        .port = 1234,
-    } };
+    const address: net.Address = net.Address.initIp4WithString(port, "127.0.0.1") catch {
+        // TODO: print error
+        return 1;
+    };
 
     try net.bind(listener, address);
-    // FIX: make sure to close listener on error
 
     try net.listen(listener, 128);
-    // FIX: make sure to close listener on error
 
     while (true) {
         var conn_address: net.Address = undefined;
 
-        const socket = net.accept(listener, &conn_address) catch |e| {
-            std.debug.print("error accept: {}\n", .{e});
+        const socket = net.accept(listener, &conn_address) catch |err| {
+            std.debug.print("error accept: {}\n", .{err});
             continue;
         };
 
-        defer _ = std.c.close(socket);
+        defer socket.deinit();
 
-        // do something with connection
+        // write to socket
     }
 
     return 0;
+}
+
+// Validate Port Number
+const PortError = error{
+    InvalidNumber,
+    WellKnownPort,
+};
+
+fn validate_port(port_str: []const u8) PortError!u16 {
+
+    // parse string to u16
+    const port = std.fmt.parseInt(u16, port_str, 10) catch {
+        return PortError.InvalidNumber;
+    };
+
+    // validate well-known ports
+    if (port < 1024) {
+        return PortError.WellKnownPort;
+    }
+
+    return port;
 }
