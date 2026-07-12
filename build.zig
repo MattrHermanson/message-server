@@ -27,7 +27,7 @@ pub fn build(b: *std.Build) void {
     const server_exe = b.addExecutable(.{
         .name = "server",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/server.zig"),
+            .root_source_file = b.path("src/server/main.zig"),
             .target = target,
             .link_libc = true,
         }),
@@ -44,7 +44,7 @@ pub fn build(b: *std.Build) void {
     const client_exe = b.addExecutable(.{
         .name = "client",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/client.zig"),
+            .root_source_file = b.path("src/client/main.zig"),
             .target = target,
             .link_libc = true,
         }),

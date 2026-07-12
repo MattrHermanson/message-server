@@ -33,49 +33,28 @@ pub fn main(init: std.process.Init) !u8 {
         return 1;
     };
 
-    const listener = try net.Socket.init(
-        net.SocketDomain.Ipv4,
-        net.SocketType.Stream,
-        0,
-    );
+    // const address: net.Address = net.Address.initIp4WithString(port, "127.0.0.1") catch {
+    //     // TODO: print error
+    //     return 1;
+    // };
 
-    defer listener.deinit();
-
-    // set socket options
-    const reuse: i32 = 1;
-    _ = try listener.setsockopt(
-        net.SocketLevel.socket,
-        net.SocketOption.reuse_address,
-        @ptrCast(&reuse),
-        @sizeOf(i32),
-    );
-
-    const address: net.Address = net.Address.initIp4WithString(port, "127.0.0.1") catch {
-        // TODO: print error
-        return 1;
-    };
-
-    try listener.bind(address);
-
-    try listener.listen(128);
-
-    while (true) {
-        var conn_address: net.Address = undefined;
-
-        const socket = listener.accept(&conn_address) catch |err| {
-            std.debug.print("error accept: {}\n", .{err});
-            continue;
-        };
-
-        defer socket.deinit();
-
-        try socket.writeAll("Hi from over the Network\n");
-
-        // TODO:
-        // 1. look at the part in the article about message boundaries
-        // 2. decide where to put write functions (either in net or somewhere else)
-        // 3. decide whether to implement kqueue or chat messager first
-    }
+    // while (true) {
+    //     var conn_address: net.Address = undefined;
+    //
+    //     const socket = listener.accept(&conn_address) catch |err| {
+    //         std.debug.print("error accept: {}\n", .{err});
+    //         continue;
+    //     };
+    //
+    //     defer socket.deinit();
+    //
+    //     try socket.writeAll("Hi from over the Network\n");
+    //
+    //     // TODO:
+    //     // 1. look at the part in the article about message boundaries
+    //     // 2. decide where to put write functions (either in net or somewhere else)
+    //     // 3. decide whether to implement kqueue or chat messager first
+    // }
 
     return 0;
 }
