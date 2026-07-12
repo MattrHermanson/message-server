@@ -32,7 +32,7 @@ pub const Flag = enum(u16) {
     Error = libc.EV_ERROR,
 };
 
-pub const Filter = enum(16) {
+pub const Filter = enum(i16) {
     Read = libc.EVFILT_READ,
     Write = libc.EVFILT_WRITE,
     Vnode = libc.EVFILT_VNODE,
@@ -101,6 +101,12 @@ pub const Kqueue = struct {
         };
     }
 
+    /// Clean up Kqueue
+    pub fn deinit(self: *Kqueue) void {
+        libc.close(self.fd);
+        self.alloc.free(self.events);
+    }
+
     /// Provide changes to register and/or edit current events
     /// wantEvents[true] to receive a updated events and errors list
     /// wantEvents[false] to not block and return immediately
@@ -146,12 +152,6 @@ pub const Kqueue = struct {
             .new_events = self.events[0..part],
             .new_errors = self.events[part..num_events],
         };
-    }
-
-    /// Clean up Kqueue
-    pub fn deinit(self: *Kqueue) void {
-        libc.close(self.fd);
-        self.alloc.free(self.events);
     }
 };
 

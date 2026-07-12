@@ -1,5 +1,6 @@
 const std = @import("std");
 const net = @import("net");
+const server = @import("server.zig");
 
 pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
@@ -33,10 +34,17 @@ pub fn main(init: std.process.Init) !u8 {
         return 1;
     };
 
-    // const address: net.Address = net.Address.initIp4WithString(port, "127.0.0.1") catch {
-    //     // TODO: print error
-    //     return 1;
-    // };
+    const address: net.Address = net.Address.initIp4WithString(port, "127.0.0.1") catch {
+        // TODO: print error
+        return 1;
+    };
+
+    // TODO: this is where server stuff will go
+    const sv = try server.Server.init(std.heap.c_allocator);
+
+    try sv.listen(address);
+
+    sv.run();
 
     // while (true) {
     //     var conn_address: net.Address = undefined;
@@ -49,11 +57,6 @@ pub fn main(init: std.process.Init) !u8 {
     //     defer socket.deinit();
     //
     //     try socket.writeAll("Hi from over the Network\n");
-    //
-    //     // TODO:
-    //     // 1. look at the part in the article about message boundaries
-    //     // 2. decide where to put write functions (either in net or somewhere else)
-    //     // 3. decide whether to implement kqueue or chat messager first
     // }
 
     return 0;

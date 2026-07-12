@@ -80,6 +80,10 @@ pub const Socket = struct {
         };
     }
 
+    pub fn deinit(self: Socket) void {
+        _ = std.c.close(@intCast(self.fd));
+    }
+
     /// Accepts a connection on the provided socket and saves the address
     /// of the new connection to address
     pub fn accept(self: Socket, address: *Address) !Socket {
@@ -209,10 +213,6 @@ pub const Socket = struct {
 
             pos += bytes_written;
         }
-    }
-
-    pub fn deinit(self: Socket) void {
-        _ = std.c.close(@intCast(self.fd));
     }
 };
 
