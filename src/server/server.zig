@@ -1,6 +1,6 @@
 const std = @import("std");
 const net = @import("net");
-const kqueue = @import("../utils/kqueue.zig");
+const kqueue = @import("kqueue");
 
 // TODO: goal -> be able to handle N clients with a kqueue
 // problems to look out for
@@ -10,16 +10,23 @@ const kqueue = @import("../utils/kqueue.zig");
 const BACKLOG_MAX = 128;
 const KQUEUE_SIZE = 128;
 
+pub const Connection = union(enum) {
+    listener: net.Socket,
+    client: Client,
+};
+
 pub const Server = struct {
     alloc: std.mem.Allocator,
     kq: kqueue.Kqueue,
     connected: u64,
-    listener: net.Socket, // TODO: remove this
+    listener: net.Socket, // TODO: remove this later
 
     pub fn init(allocator: std.mem.Allocator) !Server {
         return .{
             .alloc = allocator,
-            .kq = kqueue.Kqueue.initWithSize(allocator, KQUEUE_SIZE),
+            .kq = try kqueue.Kqueue.initWithSize(allocator, KQUEUE_SIZE),
+            .connected = 0,
+            .listener = undefined,
         };
     }
 
@@ -31,7 +38,7 @@ pub const Server = struct {
     pub fn listen(self: *Server, address: net.Address) !void {
         // Could be moved into a run function
 
-        const listener = try net.Socket.init( // TODO: only will work with Ipv4
+        var listener = try net.Socket.init( // TODO: only will work with Ipv4
             net.SocketDomain.Ipv4,
             net.SocketType.Stream,
             0,
@@ -52,48 +59,108 @@ pub const Server = struct {
 
         try listener.listen(BACKLOG_MAX);
 
+        var conn: Connection = .{ .listener = listener };
+
         const event = kqueue.Kevent{
-            .identifier = @intCast(listener.socket),
+            .identifier = @intCast(listener.fd),
             .filter = @intFromEnum(kqueue.Filter.Read),
             .flags = @intFromEnum(kqueue.Flag.Add),
             .fflags = 0,
             .data = 0,
-            .udata = null,
+            .udata = @ptrCast(&conn),
             .ext = [_]u64{0} ** 4,
         };
 
-        _ = try self.kq.kevent(&[_]kqueue.Kevent{event}, false);
+        _ = try self.kq.kevent(&[_]kqueue.Kevent{event}, false, null);
     }
 
-    pub fn run(self: Server) void {
+    // TODO: get rid of error return
+    pub fn run(self: *Server) !void {
+        std.debug.print("Server Running...\n", .{});
+
         while (true) {
-            const ready_list = try self.kq.kevent(null, true);
+            const ready_list = try self.kq.kevent(&.{}, true, null);
 
-            // TODO: handle ready list based on what ext[2] or ext[3] tells you the
-            // the connection is
-            for (ready_list.new_events) |ev| {
-                if (ev.identifier == self.listener.fd) {
-                    var new_address: net.Address = undefined;
+            for (ready_list) |ev| {
+                if (ev.udata) |raw_ptr| {
+                    const conn: *Connection = @ptrCast(@alignCast(raw_ptr));
 
-                    const new_connection = try self.listener.accept(&new_address);
+                    switch (conn.*) {
+                        .listener => {
+                            // listener is ready
 
-                    const event = kqueue.Kevent{
-                        .identifier = @intCast(new_connection.socket),
-                        .filter = @intFromEnum(kqueue.Filter.Read),
-                        .flags = @intFromEnum(kqueue.Flag.Add),
-                        .fflags = 0,
-                        .data = 0,
-                        .udata = null,
-                        .ext = [_]u64{0} ** 4,
-                    };
+                            // accept connection and pack connection union into udata
+                            const new_socket = try self.listener.accept();
+                            var new_conn: Connection = .{ .client = try Client.init(self.alloc, new_socket) };
 
-                    _ = try self.kq.kevent(&[_]kqueue.Kevent{event}, false);
+                            const event = kqueue.Kevent{
+                                .identifier = new_conn.client.socket.fd,
+                                .filter = @intFromEnum(kqueue.Filter.Read),
+                                .flags = @intFromEnum(kqueue.Flag.Add),
+                                .fflags = 0,
+                                .data = 0,
+                                .udata = @ptrCast(&new_conn),
+                                .ext = [_]u64{0} ** 4,
+                            };
 
-                    std.debug.print("connection accept'd\n", .{});
+                            // register event with kq
+                            _ = try self.kq.kevent(&[_]kqueue.Kevent{event}, false, null);
+                        },
+                        .client => {
+                            // client is ready
+
+                            // Read
+                            if (kqueue.checkFilter(ev, kqueue.Filter.Read)) {
+                                // do read
+                            }
+
+                            // Write
+                            if (kqueue.checkFilter(ev, kqueue.Filter.Write)) {
+                                // do write
+                            }
+
+                            // Close connection
+                            if (kqueue.checkFlag(ev, kqueue.Flag.EOF)) {
+                                conn.client.deinit();
+                                std.debug.print("connection closed\n", .{});
+                            }
+                        },
+                    }
                 } else {
-                    std.debug.print("message recv'd\n", .{});
+                    // no udata pointer
+                    // but should have one??
+                    unreachable;
                 }
             }
         }
+    }
+};
+
+pub const Client = struct {
+    socket: net.Socket,
+
+    alloc: std.mem.Allocator,
+
+    read_buf: []u8, // Could switch to Reader struct later
+    write_buf: []u8,
+
+    // could put timeout linked list nodes here
+
+    pub fn init(allocator: std.mem.Allocator, socket: net.Socket) !Client {
+        const read_buf = try allocator.alloc(u8, 4096);
+        const write_buf = try allocator.alloc(u8, 4096);
+
+        return .{
+            .socket = socket,
+            .alloc = allocator,
+            .read_buf = read_buf,
+            .write_buf = write_buf,
+        };
+    }
+
+    pub fn deinit(self: Client) void {
+        self.socket.deinit();
+        self.alloc.free(self.read_buf);
+        self.alloc.free(self.write_buf);
     }
 };

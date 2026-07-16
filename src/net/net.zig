@@ -27,16 +27,6 @@ pub const SocketOption = enum(u32) {
     socket_type = c.SO_TYPE,
 };
 
-pub const @"error" = error{
-    AccessDenied,
-    AddressFamilyNotSupported,
-    InvalidArguments,
-    TooManyFiles,
-    OutOfMemory,
-    ProtocolNotSupported,
-    Unexpected,
-};
-
 /// **Type** Supported socket domains
 pub const SocketDomain = enum(u32) {
     Ipv4 = c.AF_INET,
@@ -51,7 +41,8 @@ pub const SocketType = enum(u32) {
 
 /// **Type** A Socket
 pub const Socket = struct {
-    fd: u32,
+    fd: u64,
+    address: Address,
 
     /// Creates an endpoint for communication and returns a *Socket*
     pub fn init(domain: SocketDomain, sock_type: SocketType, protocol: i32) !Socket {
@@ -77,6 +68,7 @@ pub const Socket = struct {
 
         return .{
             .fd = @intCast(c_fd),
+            .address = undefined,
         };
     }
 
@@ -86,7 +78,7 @@ pub const Socket = struct {
 
     /// Accepts a connection on the provided socket and saves the address
     /// of the new connection to address
-    pub fn accept(self: Socket, address: *Address) !Socket {
+    pub fn accept(self: Socket) !Socket {
         const c_sockfd: c_int = @intCast(self.fd);
 
         // create c address struct
@@ -117,15 +109,17 @@ pub const Socket = struct {
             };
         }
 
-        packAddress(&c_address, address);
+        var address: Address = undefined;
+        packAddress(&c_address, &address);
 
         return .{
             .fd = @intCast(fd),
+            .address = address,
         };
     }
 
     /// Binds the provided socket to the provided address
-    pub fn bind(self: Socket, address: Address) !void {
+    pub fn bind(self: *Socket, address: Address) !void {
         const c_sockfd: c_int = @intCast(self.fd);
 
         // create c address struct
@@ -149,6 +143,8 @@ pub const Socket = struct {
                 else => error.Unexpected,
             };
         }
+
+        self.address = address;
     }
 
     /// Marks the provided socket as a passive listening socket for connections
@@ -198,21 +194,6 @@ pub const Socket = struct {
         }
 
         return @intCast(result);
-    }
-
-    // might remove later
-    pub fn writeAll(self: Socket, message: []const u8) !void {
-        var pos: u64 = 0;
-
-        while (pos < message.len) {
-            const bytes_written = try write(self.fd, message[pos..]);
-
-            if (bytes_written == 0) {
-                return error.ConnectionClosed;
-            }
-
-            pos += bytes_written;
-        }
     }
 };
 
@@ -360,30 +341,4 @@ fn packAddress(storage: *c.sockaddr_storage, address: *Address) void {
         },
         else => return, // FIX: throw error
     }
-}
-
-fn write(fd: u32, buffer: []const u8) !u64 {
-    const bytes_written = c.write(@intCast(fd), buffer.ptr, buffer.len);
-
-    if (bytes_written == -1) {
-        const errno = std.c._errno().*;
-
-        return switch (errno) {
-            c.EAGAIN => error.WouldBlock,
-            c.EBADF => error.NotAFileDescriptor,
-            c.EDESTADDRREQ => error.SocketAddressNotSet,
-            c.EDQUOT => error.DataQuota,
-            c.EFAULT => error.MemoryFault,
-            c.EFBIG => error.FileTooBig,
-            c.EINTR => error.Interrupted,
-            c.EINVAL => error.InvalidArguments,
-            c.EIO => error.IOError,
-            c.ENOSPC => error.NoSpace,
-            c.EPERM => error.NoPermission,
-            c.EPIPE => error.ConnectionClosed,
-            else => error.Unexpected,
-        };
-    }
-
-    return @intCast(bytes_written);
 }

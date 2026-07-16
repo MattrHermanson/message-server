@@ -5,7 +5,22 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const translate_c = b.addTranslateC(.{
+    const kqueue_translate_c = b.addTranslateC(.{
+        .root_source_file = b.path("src/kqueue/c.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const kqueue_module = b.createModule(.{
+        .root_source_file = b.path("src/kqueue/kqueue.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
+    kqueue_module.addImport("libc", kqueue_translate_c.createModule());
+
+    const net_translate_c = b.addTranslateC(.{
         .root_source_file = b.path("src/net/c.h"),
         .target = target,
         .optimize = optimize,
@@ -19,7 +34,7 @@ pub fn build(b: *std.Build) void {
     });
 
     // Extracted from inline array to avoid pointer issues
-    net_module.addImport("libc", translate_c.createModule());
+    net_module.addImport("libc", net_translate_c.createModule());
 
     // ==========================================
     // Server Configuration
@@ -34,6 +49,7 @@ pub fn build(b: *std.Build) void {
     });
 
     server_exe.root_module.addImport("net", net_module);
+    server_exe.root_module.addImport("kqueue", kqueue_module);
 
     // Tell the build system to put the compiled binary in the `zig-out/bin` folder
     b.installArtifact(server_exe);

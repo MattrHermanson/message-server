@@ -40,11 +40,11 @@ pub fn main(init: std.process.Init) !u8 {
     };
 
     // TODO: this is where server stuff will go
-    const sv = try server.Server.init(std.heap.c_allocator);
+    var sv = try server.Server.init(std.heap.c_allocator);
 
     try sv.listen(address);
 
-    sv.run();
+    try sv.run();
 
     // while (true) {
     //     var conn_address: net.Address = undefined;
