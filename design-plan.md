@@ -31,9 +31,9 @@
     Will use binary encoding with a fixed header prefix that will include the
     length of the message and maybe user info. Push update pattern.
 
-    Fixed Header Format (bytes) - Max 16Mb
+    Fixed Header Format (6 Bytes) - Max 16Mb
     +--------------+-----------+----------+---------------+
-    |Magic Byte (2)|Version (1)|Opcode (1)|Payload Len (3)|
+    |Magic Byte (1)|Version (1)|Opcode (1)|Payload Len (3)|
     +--------------+-----------+----------+---------------+
 
     Payload Format (TLV) - Max 65K

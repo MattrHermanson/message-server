@@ -4,6 +4,8 @@
 const std = @import("std");
 const c = @import("libc");
 
+// TODO: Rethink this interms of heap allocating all of this
+
 // Types
 pub const SocketLevel = enum(u32) {
     socket = c.SOL_SOCKET,
@@ -45,7 +47,7 @@ pub const Socket = struct {
     address: Address,
 
     /// Creates an endpoint for communication and returns a *Socket*
-    pub fn init(domain: SocketDomain, sock_type: SocketType, protocol: i32) !Socket {
+    pub fn init(domain: SocketDomain, sock_type: SocketType, protocol: i32, isNonBlocking: bool) !Socket {
         const c_domain: c_int = @intCast(@intFromEnum(domain));
         const c_sock_type: c_int = @intCast(@intFromEnum(sock_type));
         const c_protocol: c_int = @intCast(protocol);
@@ -64,6 +66,15 @@ pub const Socket = struct {
                 c.EPROTONOSUPPORT => error.ProtocolNotSupported,
                 else => error.Unexpected,
             };
+        }
+
+        if (isNonBlocking) {
+            var flags = c.fcntl(c_fd, c.F_GETFL);
+            if (flags == -1) return error.NoBlockError;
+
+            flags |= c.O_NONBLOCK;
+
+            if (c.fcntl(c_fd, c.F_SETFL, flags) == -1) return error.NoBlockError;
         }
 
         return .{
@@ -341,4 +352,61 @@ fn packAddress(storage: *c.sockaddr_storage, address: *Address) void {
         },
         else => return, // FIX: throw error
     }
+}
+
+// TODO: move I/O to another file
+pub fn read(fd: u64, buffer: []u8) !usize {
+    const bytes_read = c.read(@intCast(fd), buffer.ptr, buffer.len);
+
+    if (bytes_read == -1) {
+        const errno = std.c._errno().*;
+
+        return switch (errno) {
+            c.EWOULDBLOCK => error.WouldBlock,
+            c.EBADF => error.NotAFileDescriptor,
+            c.EINTR => error.Interrupted,
+            c.EINVAL => error.InvalidArguments,
+            c.EIO => error.IoError,
+            else => error.Unexpected,
+        };
+    }
+
+    return @intCast(bytes_read);
+}
+
+// NOTE: can pass a max of 8 buffers
+pub fn readv(fd: u64, buffers: [][]u8) !usize {
+    const MAX_IOVS = 8;
+
+    if (buffers.len > MAX_IOVS) return error.InvalidArguments;
+
+    var iov: [MAX_IOVS]c.iovec = undefined;
+
+    for (buffers, 0..) |buf, i| {
+        iov[i] = c.iovec{
+            .iov_base = buf.ptr,
+            .iov_len = buf.len,
+        };
+    }
+
+    const bytes_read = c.readv(
+        @intCast(fd),
+        &iov,
+        @intCast(buffers.len),
+    );
+
+    if (bytes_read == -1) {
+        const errno = std.c._errno().*;
+
+        return switch (errno) {
+            c.EWOULDBLOCK => error.WouldBlock,
+            c.EBADF => error.NotAFileDescriptor,
+            c.EINTR => error.Interrupted,
+            c.EINVAL => error.InvalidArguments,
+            c.EIO => error.IoError,
+            else => error.Unexpected,
+        };
+    }
+
+    return @intCast(bytes_read);
 }
