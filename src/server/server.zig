@@ -209,8 +209,8 @@ pub const Reader = struct {
             .allocator = allocator,
             .msg_buf = buf,
             .overflow_buf = null,
-            .start = 0,
-            .pos = 0,
+            .start = 4,
+            .pos = 4,
             .isFull = false,
             .overflow_pos = 0,
             .fd = fd,
@@ -270,7 +270,6 @@ pub const Reader = struct {
         if (size < 6) return false;
 
         const msg_length = self.getLengthFromHeader();
-        std.debug.print("msg length: {d}\n", .{msg_length});
 
         if (size + self.overflow_pos >= msg_length) return true;
 
@@ -279,15 +278,6 @@ pub const Reader = struct {
 
     fn getMessageLength(self: Reader) !usize {
         if (!self.isMessageReady()) {
-            std.debug.print(
-                "S: {d}, P: {d}, F: {}, OP: {d}\n",
-                .{
-                    self.start,
-                    self.pos,
-                    self.isFull,
-                    self.overflow_pos,
-                },
-            );
             return error.NoMessage;
         }
 
@@ -376,7 +366,7 @@ pub const Reader = struct {
                 self.pos = (self.pos + bytes_read) % self.msg_buf.len; // update pos, wrapping if needed
 
                 // mark buffer as full if last would make pos == start
-                self.isFull = (self.pos + bytes_read == self.start);
+                self.isFull = (self.pos == self.start);
             } else {
                 // read into overflow
 
