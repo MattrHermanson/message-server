@@ -65,6 +65,11 @@
     in your event loop. This gives your background threads a way to notify the
     main network loop when they finish a blocking task.
 
+* Concurrency Plans
+    1. Per Client Message Queues
+    2. Worker Pinning (Thread Affinity)
+        * a client always gets handled by the same thread
+
 #### Phase 3: Custom Protocol & Parsing
 
 * Define the Header Parser: Write logic to read the fixed-size packet header,

@@ -410,3 +410,30 @@ pub fn readv(fd: u64, buffers: [][]u8) !usize {
 
     return @intCast(bytes_read);
 }
+
+pub fn write(fd: u64, buffer: []const u8) !usize {
+    const bytes_written = c.write(@intCast(fd), buffer.ptr, buffer.len);
+
+    if (bytes_written == -1) {
+        const errno = std.c._errno().*;
+
+        return switch (errno) {
+            c.EWOULDBLOCK => error.WouldBlock,
+            c.EBADF => error.NotAFileDescriptor,
+            c.EINTR => error.Interrupted,
+            c.EINVAL => error.InvalidArguments,
+            c.EIO => error.IoError,
+            c.EDQUOT => error.ExhuastedDataQuota,
+            c.EFAULT => error.OutOfAddressSpace,
+            c.ECONNRESET => error.SocketNotConnected,
+            c.EFBIG => error.FileTooBig,
+            c.ENETDOWN => error.NetInterfaceDown,
+            c.ENETUNREACH => error.NetworkUnreachable,
+            c.ENOSPC => error.OutOfSpace,
+            c.EPIPE => error.PipeError,
+            else => error.Unexpected,
+        };
+    }
+
+    return @intCast(bytes_written);
+}

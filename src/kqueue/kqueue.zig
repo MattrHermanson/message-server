@@ -55,7 +55,7 @@ pub fn checkFlag(event: Kevent, flag: Flag) bool {
 }
 
 pub fn checkFilter(event: Kevent, filter: Filter) bool {
-    return (event.filter & @intFromEnum(filter)) == @intFromEnum(filter);
+    return event.filter == @intFromEnum(filter);
 }
 
 pub const Kqueue = struct {
@@ -111,14 +111,14 @@ pub const Kqueue = struct {
             events_length = 0;
         }
 
-        const num_events: usize = @intCast(c.kevent(
+        const num_events = c.kevent(
             @intCast(self.fd),
             @ptrCast(changes.ptr),
             @intCast(changes.len),
             @ptrCast(self.events.ptr),
             @intCast(events_length),
             @ptrCast(timeout),
-        ));
+        );
 
         // error map
         if (num_events == -1) {
@@ -137,6 +137,6 @@ pub const Kqueue = struct {
             };
         }
 
-        return self.events[0..num_events];
+        return self.events[0..@intCast(num_events)];
     }
 };

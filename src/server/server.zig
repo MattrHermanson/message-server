@@ -73,7 +73,7 @@ pub const Server = struct {
         _ = try self.kq.kevent(&[_]kqueue.Kevent{event}, false, null);
     }
 
-    // TODO: get rid of error return
+    // HACK: server should handle not return errors
     pub fn run(self: *Server) !void {
         std.debug.print("Server Running...\n", .{});
 
@@ -122,13 +122,16 @@ pub const Server = struct {
                                     try reader.copyMessage(msg);
 
                                     std.debug.print("msg: {s}\n", .{msg});
+                                    std.debug.print("writing...\n", .{});
+                                    try conn.client.writer.writeMessage(&self.kq, msg, conn);
                                     self.allocator.free(msg);
                                 }
                             }
 
                             // Write
                             if (kqueue.checkFilter(ev, kqueue.Filter.Write)) {
-                                // do write
+                                std.debug.print("flushing...\n", .{});
+                                try conn.client.writer.flush(&self.kq, conn);
                             }
 
                             // Close connection
@@ -154,19 +157,19 @@ pub const Client = struct {
     alloc: std.mem.Allocator,
 
     reader: Reader,
-    write_buf: []u8,
+    writer: Writer,
 
     // could put timeout linked list nodes here
 
     pub fn init(allocator: std.mem.Allocator, socket: net.Socket) !Client {
         const reader = try Reader.init(allocator, socket.fd, 4096);
-        const write_buf = try allocator.alloc(u8, 4096);
+        const writer = Writer.init(allocator, socket.fd);
 
         return .{
             .socket = socket,
             .alloc = allocator,
             .reader = reader,
-            .write_buf = write_buf,
+            .writer = writer,
         };
     }
 
@@ -178,9 +181,9 @@ pub const Client = struct {
 
     // TODO: abstract getting a message into the Client
 
-    pub fn deinit(self: Client) void {
+    pub fn deinit(self: *Client) void {
         self.reader.deinit();
-        self.alloc.free(self.write_buf);
+        self.writer.deinit();
         self.socket.deinit();
     }
 };
@@ -356,7 +359,7 @@ pub const Reader = struct {
 
                 const bytes_read = net.readv(self.fd, read_buffers) catch |err| {
                     switch (err) {
-                        error.WouldBlock => break,
+                        error.WouldBlock => return false,
                         else => return err,
                     }
                 };
@@ -386,5 +389,130 @@ pub const Reader = struct {
         }
 
         return true;
+    }
+};
+
+// FLOW
+// call writeMessage() passing a message into the Writer
+//      w/ the expectation that the message will get written
+//
+// writeMessage() queues the message into a linked list of messages
+//      to be sent, and sets write notifs for the kevent
+//
+// every kevent returns with the write flagged, call flush()
+
+// FUNCTION REQUIREMENTS
+// writeMessage()
+// - takes kqueue to register socket for write notifs
+//
+// flush()
+// - takes kqueue to unregister socket for write notifs
+
+const OutMsg = struct {
+    data: []const u8,
+    sent_bytes: usize = 0,
+    next: ?*OutMsg = null,
+};
+
+pub const Writer = struct {
+    allocator: std.mem.Allocator,
+    fd: u64,
+
+    // HACK: add max outgoing messages
+
+    head_msg: ?*OutMsg,
+    tail_msg: ?*OutMsg,
+
+    pub fn init(allocator: std.mem.Allocator, fd: u64) Writer {
+        return .{
+            .allocator = allocator,
+            .fd = fd,
+            .head_msg = null,
+            .tail_msg = null,
+        };
+    }
+
+    pub fn deinit(self: *Writer) void {
+        while (self.head_msg) |msg| {
+            self.head_msg = msg.next;
+            self.allocator.destroy(msg);
+        }
+    }
+
+    /// pushes messages to the queue, msg must have a correctly formatted header
+    /// msg will be copied internally, caller is responsible for freeing the buffer passed in
+    pub fn writeMessage(self: *Writer, kq: *kqueue.Kqueue, msg: []const u8, connection: *Connection) !void {
+
+        // TODO: use object pool for messages
+        const new_out_msg = try self.allocator.create(OutMsg);
+        new_out_msg.data = try self.allocator.dupe(u8, msg);
+        new_out_msg.sent_bytes = 0;
+        new_out_msg.next = null;
+
+        if (self.head_msg == null) {
+            self.head_msg = new_out_msg;
+            self.tail_msg = new_out_msg;
+        } else {
+            if (self.tail_msg) |tail_msg| {
+                tail_msg.next = new_out_msg;
+                self.tail_msg = new_out_msg;
+            }
+        }
+
+        const event = kqueue.Kevent{
+            .identifier = connection.client.socket.fd,
+            .filter = @intFromEnum(kqueue.Filter.Write),
+            .flags = @intFromEnum(kqueue.Flag.Add),
+            .fflags = 0,
+            .data = 0,
+            .udata = @ptrCast(connection),
+            .ext = [_]u64{0} ** 4,
+        };
+
+        // register event with kq
+        _ = try kq.kevent(&[_]kqueue.Kevent{event}, false, null);
+    }
+
+    // writes (somtimes partially) messages to the socket, popping msgs
+    pub fn flush(self: *Writer, kq: *kqueue.Kqueue, connection: *Connection) !void {
+
+        // write until head is null or write would block
+        while (self.head_msg) |head| {
+            const bytes_written = net.write(self.fd, head.data[head.sent_bytes..]) catch |err| {
+                switch (err) {
+                    error.WouldBlock => return,
+                    else => return err,
+                }
+            };
+
+            // HACK: handle bytes_written == 0 | connection closed
+
+            head.sent_bytes += bytes_written;
+
+            // free head and advance queue
+            if (head.sent_bytes == head.data.len) {
+                self.head_msg = head.next;
+                if (self.head_msg == null) {
+                    self.tail_msg = null;
+                }
+
+                self.allocator.free(head.data);
+                self.allocator.destroy(head);
+            }
+        }
+
+        // if head is null remove write from kqueue
+        const event = kqueue.Kevent{
+            .identifier = connection.client.socket.fd,
+            .filter = @intFromEnum(kqueue.Filter.Write),
+            .flags = @intFromEnum(kqueue.Flag.Disable),
+            .fflags = 0,
+            .data = 0,
+            .udata = @ptrCast(connection),
+            .ext = [_]u64{0} ** 4,
+        };
+
+        // register event with kq
+        _ = try kq.kevent(&[_]kqueue.Kevent{event}, false, null);
     }
 };
