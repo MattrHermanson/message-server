@@ -88,6 +88,8 @@ pub const Server = struct {
                         .listener => {
                             // listener is ready
 
+                            // TODO: loop until accept would block
+
                             // TODO: use object pool to allocate connections
 
                             // accept connection and pack connection union into udata
@@ -112,11 +114,29 @@ pub const Server = struct {
                         .client => {
                             // client is ready
 
-                            // Read
-                            if (kqueue.checkFilter(ev, kqueue.Filter.Read)) {
-                                var reader = conn.client.reader;
+                            var should_close = false;
 
-                                while (try reader.readMessage()) {
+                            if (kqueue.checkFlag(ev, kqueue.Flag.EOF)) {
+                                should_close = true;
+                            }
+
+                            // Read
+                            if (!should_close and kqueue.checkFilter(ev, kqueue.Filter.Read)) {
+                                var reader = &conn.client.reader;
+
+                                while (true) {
+                                    const isMessage = reader.readMessage() catch |err| {
+                                        switch (err) {
+                                            error.ConnectionClosed => {
+                                                should_close = true;
+                                                break;
+                                            },
+                                            else => return err,
+                                        }
+                                    };
+
+                                    if (!isMessage) break;
+
                                     const msg_length = try reader.getMessageLength();
                                     const msg = try self.allocator.alloc(u8, msg_length);
                                     try reader.copyMessage(msg);
@@ -129,15 +149,19 @@ pub const Server = struct {
                             }
 
                             // Write
-                            if (kqueue.checkFilter(ev, kqueue.Filter.Write)) {
+                            if (!should_close and kqueue.checkFilter(ev, kqueue.Filter.Write)) {
                                 std.debug.print("flushing...\n", .{});
-                                try conn.client.writer.flush(&self.kq, conn);
+                                conn.client.writer.flush(&self.kq, conn) catch |err| {
+                                    if (err == error.SocketNotConnected or err == error.PipeError) {
+                                        should_close = true;
+                                    }
+                                };
                             }
 
                             // Close connection
-                            if (kqueue.checkFlag(ev, kqueue.Flag.EOF)) {
+                            if (should_close) {
                                 conn.client.deinit();
-                                std.debug.print("connection closed\n", .{});
+                                std.debug.print("Connection Closed\n", .{});
                             }
                         },
                     }
@@ -179,8 +203,6 @@ pub const Client = struct {
         return client;
     }
 
-    // TODO: abstract getting a message into the Client
-
     pub fn deinit(self: *Client) void {
         self.reader.deinit();
         self.writer.deinit();
@@ -189,11 +211,11 @@ pub const Client = struct {
 };
 
 // NOTE: |Magic Byte (1)|Version (1)|Opcode (1)|Message Len (3)| - Payload length includes the 6 header bytes
-// need to redo this with non blocking in mind -- rewrite to save progress when read throws EWOULDBLOCK
-// probably want greedy reading
-// should return some signal that connection is closed when read returns 0 bytes
 
 pub const Reader = struct {
+
+    // TODO: Consider rewriting to use a buffer pool, and chain buffers for larger msgs
+
     allocator: std.mem.Allocator,
 
     msg_buf: []u8,
@@ -364,7 +386,7 @@ pub const Reader = struct {
                     }
                 };
 
-                if (bytes_read == 0) return self.isMessageReady();
+                if (bytes_read == 0) return error.ConnectionClosed; // was isMessageReady()
 
                 self.pos = (self.pos + bytes_read) % self.msg_buf.len; // update pos, wrapping if needed
 
@@ -476,6 +498,8 @@ pub const Writer = struct {
     // writes (somtimes partially) messages to the socket, popping msgs
     pub fn flush(self: *Writer, kq: *kqueue.Kqueue, connection: *Connection) !void {
 
+        // TODO: use writev to write OutMsg queue
+
         // write until head is null or write would block
         while (self.head_msg) |head| {
             const bytes_written = net.write(self.fd, head.data[head.sent_bytes..]) catch |err| {
@@ -484,8 +508,6 @@ pub const Writer = struct {
                     else => return err,
                 }
             };
-
-            // HACK: handle bytes_written == 0 | connection closed
 
             head.sent_bytes += bytes_written;
 
