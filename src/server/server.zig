@@ -4,8 +4,7 @@ const kqueue = @import("kqueue");
 
 // TODO: current goal -> be able to handle N clients with a kqueue
 // problems to look out for
-//  1. how will sockets get deinit'd
-//  2. timeouts and closing connections
+//  1. timeouts and closing connections
 
 const BACKLOG_MAX = 128;
 const KQUEUE_SIZE = 128;
@@ -15,6 +14,7 @@ pub const Connection = union(enum) {
     client: *Client,
 };
 
+/// To start server, init() -> listen() -> run()
 pub const Server = struct {
     allocator: std.mem.Allocator,
     kq: kqueue.Kqueue,
@@ -35,7 +35,7 @@ pub const Server = struct {
     }
 
     pub fn listen(self: *Server, address: net.Address) !void {
-        var listener_ptr = try self.allocator.create(net.Socket);
+        var listener_ptr = try self.allocator.create(net.Socket); // FIX: leaks
 
         listener_ptr.* = try net.Socket.init( // TODO: only will work with Ipv4
             net.SocketDomain.Ipv4,
@@ -58,7 +58,7 @@ pub const Server = struct {
         try listener_ptr.listen(BACKLOG_MAX);
 
         // put listener connection on the heap
-        const conn = try self.allocator.create(Connection);
+        const conn = try self.allocator.create(Connection); // FIX: leaks
         conn.* = .{ .listener = listener_ptr };
 
         const event = kqueue.Kevent{
@@ -122,7 +122,7 @@ pub const Server = struct {
                                 var reader = &conn.client.reader;
 
                                 while (true) {
-                                    const isMessage = reader.readMessage() catch |err| {
+                                    const isMessageReady = reader.readMessage() catch |err| {
                                         switch (err) {
                                             error.ConnectionClosed, error.ConnectionReset => {
                                                 should_close = true;
@@ -132,7 +132,7 @@ pub const Server = struct {
                                         }
                                     };
 
-                                    if (!isMessage) break;
+                                    if (!isMessageReady) break;
 
                                     const msg_length = try reader.getMessageLength();
                                     const msg = try self.allocator.alloc(u8, msg_length);
@@ -155,6 +155,8 @@ pub const Server = struct {
                             // Close connection
                             if (should_close) {
                                 conn.client.deinit();
+                                self.allocator.destroy(conn.client);
+                                self.allocator.destroy(conn);
                             }
                         },
                     }
@@ -209,6 +211,8 @@ pub const Client = struct {
 
 // NOTE: |Magic Byte (1)|Version (1)|Opcode (1)|Message Len (3)| - Payload length includes the 6 header bytes
 
+/// if readMessage() returns true, find out how much to allocate from getMessageLength(),
+/// then call copyMessage() to pull the message out of Reader
 pub const Reader = struct {
 
     // TODO: Consider rewriting to use a buffer pool, and chain buffers for larger msgs

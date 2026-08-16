@@ -188,8 +188,16 @@ fn testResponseTime(result: *bool, end_lock: *mutex) void {
     }
 }
 
-test "Header Pause" {}
+test "Header Pause" {
+    // send partial headers then wait
+}
 
-test "Internal Buffer Straddling" {}
+test "Internal Buffer Straddling" {
+    // if buf 4096 bytes, send 4095, 4096, 4097 bytes
+    // send two messages together with the 2nd's header
+    //      spanning into overflow
+}
 
-test "Greedy Reads" {}
+test "Greedy Reads" {
+    // send many small messages to test greedy reading
+}
