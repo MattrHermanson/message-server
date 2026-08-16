@@ -44,20 +44,9 @@ pub fn main(init: std.process.Init) !u8 {
 
     try sv.listen(address);
 
-    try sv.run();
-
-    // while (true) {
-    //     var conn_address: net.Address = undefined;
-    //
-    //     const socket = listener.accept(&conn_address) catch |err| {
-    //         std.debug.print("error accept: {}\n", .{err});
-    //         continue;
-    //     };
-    //
-    //     defer socket.deinit();
-    //
-    //     try socket.writeAll("Hi from over the Network\n");
-    // }
+    sv.run() catch |err| {
+        std.debug.print("ERROR: {}\n", .{err});
+    };
 
     return 0;
 }

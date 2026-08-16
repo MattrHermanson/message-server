@@ -19,17 +19,18 @@ pub const Server = struct {
     allocator: std.mem.Allocator,
     kq: kqueue.Kqueue,
     connected: u64,
+    running: std.atomic.Value(bool),
 
     pub fn init(allocator: std.mem.Allocator) !Server {
         return .{
             .allocator = allocator,
             .kq = try kqueue.Kqueue.initWithSize(allocator, KQUEUE_SIZE),
             .connected = 0,
+            .running = std.atomic.Value(bool).init(true),
         };
     }
 
     pub fn deinit(self: *Server) void {
-        self.alloc.deinit();
         self.kq.deinit();
     }
 
@@ -67,7 +68,6 @@ pub const Server = struct {
             .fflags = 0,
             .data = 0,
             .udata = @ptrCast(conn),
-            .ext = [_]u64{0} ** 4,
         };
 
         _ = try self.kq.kevent(&[_]kqueue.Kevent{event}, false, null);
@@ -75,10 +75,10 @@ pub const Server = struct {
 
     // HACK: server should handle not return errors
     pub fn run(self: *Server) !void {
-        std.debug.print("Server Running...\n", .{});
+        var timeout = kqueue.Timespec{ .sec = 0, .nsec = 50_000_000 };
 
-        while (true) {
-            const ready_list = try self.kq.kevent(&.{}, true, null);
+        while (self.running.load(.acquire)) {
+            const ready_list = try self.kq.kevent(&.{}, true, &timeout);
 
             for (ready_list) |ev| {
                 if (ev.udata) |raw_ptr| {
@@ -88,12 +88,10 @@ pub const Server = struct {
                         .listener => {
                             // listener is ready
 
-                            // TODO: loop until accept would block
-
                             // TODO: use object pool to allocate connections
 
                             // accept connection and pack connection union into udata
-                            const new_socket = try conn.listener.*.accept();
+                            const new_socket = try conn.listener.*.accept(true); // TODO: loop until accept would block
                             const new_conn = try self.allocator.create(Connection);
                             const new_client = try Client.create(self.allocator, new_socket);
                             new_conn.* = .{ .client = new_client };
@@ -105,7 +103,6 @@ pub const Server = struct {
                                 .fflags = 0,
                                 .data = 0,
                                 .udata = @ptrCast(new_conn),
-                                .ext = [_]u64{0} ** 4,
                             };
 
                             // register event with kq
@@ -121,13 +118,13 @@ pub const Server = struct {
                             }
 
                             // Read
-                            if (!should_close and kqueue.checkFilter(ev, kqueue.Filter.Read)) {
+                            if (kqueue.checkFilter(ev, kqueue.Filter.Read)) {
                                 var reader = &conn.client.reader;
 
                                 while (true) {
                                     const isMessage = reader.readMessage() catch |err| {
                                         switch (err) {
-                                            error.ConnectionClosed => {
+                                            error.ConnectionClosed, error.ConnectionReset => {
                                                 should_close = true;
                                                 break;
                                             },
@@ -141,16 +138,13 @@ pub const Server = struct {
                                     const msg = try self.allocator.alloc(u8, msg_length);
                                     try reader.copyMessage(msg);
 
-                                    std.debug.print("msg: {s}\n", .{msg});
-                                    std.debug.print("writing...\n", .{});
                                     try conn.client.writer.writeMessage(&self.kq, msg, conn);
                                     self.allocator.free(msg);
                                 }
                             }
 
                             // Write
-                            if (!should_close and kqueue.checkFilter(ev, kqueue.Filter.Write)) {
-                                std.debug.print("flushing...\n", .{});
+                            if (kqueue.checkFilter(ev, kqueue.Filter.Write)) {
                                 conn.client.writer.flush(&self.kq, conn) catch |err| {
                                     if (err == error.SocketNotConnected or err == error.PipeError) {
                                         should_close = true;
@@ -161,7 +155,6 @@ pub const Server = struct {
                             // Close connection
                             if (should_close) {
                                 conn.client.deinit();
-                                std.debug.print("Connection Closed\n", .{});
                             }
                         },
                     }
@@ -172,6 +165,10 @@ pub const Server = struct {
                 }
             }
         }
+    }
+
+    pub fn stop(self: *Server) void {
+        self.running.store(false, .release);
     }
 };
 
@@ -254,7 +251,7 @@ pub const Reader = struct {
         if (self.isFull) {
             return self.msg_buf.len;
         } else {
-            return (self.pos - self.start + self.msg_buf.len) % self.msg_buf.len;
+            return (self.pos + self.msg_buf.len - self.start) % self.msg_buf.len;
         }
     }
 
@@ -284,8 +281,7 @@ pub const Reader = struct {
             const head_len = 3 - tail_len;
             @memcpy(length_bytes[tail_len..3], self.msg_buf[0..head_len]);
 
-            var message_length: u32 = @intCast(std.mem.readInt(u24, &length_bytes, .big));
-            message_length = std.mem.toNative(u32, message_length, .big);
+            const message_length: u32 = @intCast(std.mem.readInt(u24, &length_bytes, .big));
             return @intCast(message_length);
         }
     }
@@ -319,7 +315,7 @@ pub const Reader = struct {
         const bytes_inside = if (self.isFull)
             self.msg_buf.len
         else
-            (self.pos - self.start + self.msg_buf.len) % self.msg_buf.len;
+            (self.pos + self.msg_buf.len - self.start) % self.msg_buf.len;
 
         const internal_copy_len = @min(msg_length, bytes_inside);
 
@@ -488,11 +484,11 @@ pub const Writer = struct {
             .fflags = 0,
             .data = 0,
             .udata = @ptrCast(connection),
-            .ext = [_]u64{0} ** 4,
         };
 
         // register event with kq
         _ = try kq.kevent(&[_]kqueue.Kevent{event}, false, null);
+        try self.flush(kq, connection);
     }
 
     // writes (somtimes partially) messages to the socket, popping msgs
@@ -531,7 +527,6 @@ pub const Writer = struct {
             .fflags = 0,
             .data = 0,
             .udata = @ptrCast(connection),
-            .ext = [_]u64{0} ** 4,
         };
 
         // register event with kq

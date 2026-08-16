@@ -12,7 +12,6 @@ pub const Kevent = extern struct {
     fflags: u32,
     data: i64,
     udata: ?*anyopaque,
-    ext: [4]u64,
 };
 
 pub const Flag = enum(u16) {
@@ -59,7 +58,7 @@ pub fn checkFilter(event: Kevent, filter: Filter) bool {
 }
 
 pub const Kqueue = struct {
-    fd: u32,
+    fd: u64,
     alloc: std.mem.Allocator,
     events: []Kevent,
 
@@ -96,7 +95,7 @@ pub const Kqueue = struct {
 
     /// Clean up Kqueue
     pub fn deinit(self: *Kqueue) void {
-        c.close(self.fd);
+        _ = c.close(@intCast(self.fd));
         self.alloc.free(self.events);
     }
 

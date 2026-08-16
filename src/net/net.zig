@@ -89,7 +89,7 @@ pub const Socket = struct {
 
     /// Accepts a connection on the provided socket and saves the address
     /// of the new connection to address
-    pub fn accept(self: Socket) !Socket {
+    pub fn accept(self: Socket, isNonBlocking: bool) !Socket {
         const c_sockfd: c_int = @intCast(self.fd);
 
         // create c address struct
@@ -118,6 +118,13 @@ pub const Socket = struct {
                 c.EPROTO => error.ProtocolError,
                 else => error.Unexpected,
             };
+        }
+
+        if (isNonBlocking) {
+            var flags = c.fcntl(fd, c.F_GETFL);
+            if (flags == -1) return error.NoBlockError;
+            flags |= c.O_NONBLOCK;
+            if (c.fcntl(fd, c.F_SETFL, flags) == -1) return error.NoBlockError;
         }
 
         var address: Address = undefined;
@@ -174,6 +181,37 @@ pub const Socket = struct {
                 c.EBADF => error.NotAFileDescriptor,
                 c.ENOTSOCK => error.NotASocket,
                 c.EOPNOTSUPP => error.OperationNotSupported,
+                else => error.Unexpected,
+            };
+        }
+    }
+
+    pub fn connect(self: Socket, address: Address) !void {
+        const c_sockfd: c_int = @intCast(self.fd);
+
+        // create c address struct
+        var c_address: c.sockaddr_storage = undefined;
+        var c_address_len: u32 = undefined;
+
+        unpackAddress(address, @ptrCast(&c_address), &c_address_len);
+
+        const result = c.connect(c_sockfd, @ptrCast(&c_address), c_address_len);
+
+        if (result == -1) {
+            const errno = std.c._errno().*;
+
+            return switch (errno) {
+                c.EACCES => error.AccessError,
+                c.EPERM => error.PermissionError,
+                c.EADDRINUSE => error.AddressInUse,
+                c.EADDRNOTAVAIL => error.AddressNotAvailable,
+                c.EAFNOSUPPORT => error.AddressFamilyNotSupported,
+                c.EWOULDBLOCK => error.WouldBlock,
+                c.EBADF => error.NotAFileDescriptor,
+                c.EINTR => error.Interrupted,
+                c.EISCONN => error.AlreadyConnected,
+                c.ENETUNREACH => error.NetworkUnreachable,
+                c.ENOTSOCK => error.NotASocket,
                 else => error.Unexpected,
             };
         }
@@ -367,6 +405,7 @@ pub fn read(fd: u64, buffer: []u8) !usize {
             c.EINTR => error.Interrupted,
             c.EINVAL => error.InvalidArguments,
             c.EIO => error.IoError,
+            c.ECONNRESET => error.ConnectionReset,
             else => error.Unexpected,
         };
     }
@@ -401,9 +440,17 @@ pub fn readv(fd: u64, buffers: [][]u8) !usize {
         return switch (errno) {
             c.EWOULDBLOCK => error.WouldBlock,
             c.EBADF => error.NotAFileDescriptor,
+            c.EFAULT => error.OutOfAddressSpace,
             c.EINTR => error.Interrupted,
             c.EINVAL => error.InvalidArguments,
             c.EIO => error.IoError,
+            c.EISDIR => error.IsDirectory,
+            c.ENOBUFS => error.NoBuffers,
+            c.ENOMEM => error.OutOfMemory,
+            c.ENXIO => error.DeviceDoesNotExist,
+            c.ESTALE => error.StaleFile,
+            c.ETIMEDOUT => error.ConnectionTimedOut,
+            c.ECONNRESET => error.ConnectionReset,
             else => error.Unexpected,
         };
     }
