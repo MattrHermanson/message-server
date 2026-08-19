@@ -2,40 +2,78 @@ const std = @import("std");
 const net = @import("net");
 const kqueue = @import("kqueue");
 
-// TODO: current goal -> be able to handle N clients with a kqueue
-// problems to look out for
-//  1. timeouts and closing connections
+// NOTE: current goal -> be able to handle N clients with a kqueue
 
 const BACKLOG_MAX = 128;
 const KQUEUE_SIZE = 128;
 
-pub const Connection = union(enum) {
-    listener: *net.Socket,
-    client: *Client,
+const Connection = struct {
+    next: ?*Connection,
+    prev: ?*Connection,
+
+    type: union(enum) { // not sure about this name (maybe data???)
+        listener: *net.Socket,
+        client: *Client,
+    },
+
+    /// assumes nodes are prepended
+    pub fn removeConnection(self: *Connection, head: *?*Connection) void {
+        const next = self.next;
+        const prev = self.prev;
+
+        if (prev) |p| {
+            p.next = next;
+        } else {
+            head.* = next;
+        }
+
+        if (next) |n| {
+            n.prev = prev;
+        }
+
+        self.next = null;
+        self.prev = null;
+    }
 };
 
 /// To start server, init() -> listen() -> run()
 pub const Server = struct {
     allocator: std.mem.Allocator,
     kq: kqueue.Kqueue,
-    connected: u64,
     running: std.atomic.Value(bool),
+    active_connections: ?*Connection,
 
     pub fn init(allocator: std.mem.Allocator) !Server {
         return .{
             .allocator = allocator,
             .kq = try kqueue.Kqueue.initWithSize(allocator, KQUEUE_SIZE),
-            .connected = 0,
             .running = std.atomic.Value(bool).init(true),
+            .active_connections = null,
         };
     }
 
-    pub fn deinit(self: *Server) void {
+    fn deinit(self: *Server) void {
         self.kq.deinit();
+
+        while (self.active_connections) |connection| {
+            switch (connection.type) {
+                .listener => |listener| {
+                    listener.deinit();
+                    self.allocator.destroy(listener);
+                },
+                .client => |client| {
+                    client.deinit();
+                    self.allocator.destroy(client);
+                },
+            }
+
+            self.active_connections = connection.next;
+            self.allocator.destroy(connection);
+        }
     }
 
     pub fn listen(self: *Server, address: net.Address) !void {
-        var listener_ptr = try self.allocator.create(net.Socket); // FIX: leaks
+        var listener_ptr = try self.allocator.create(net.Socket);
 
         listener_ptr.* = try net.Socket.init( // TODO: only will work with Ipv4
             net.SocketDomain.Ipv4,
@@ -58,8 +96,19 @@ pub const Server = struct {
         try listener_ptr.listen(BACKLOG_MAX);
 
         // put listener connection on the heap
-        const conn = try self.allocator.create(Connection); // FIX: leaks
-        conn.* = .{ .listener = listener_ptr };
+        const listener_conn = try self.allocator.create(Connection);
+        listener_conn.* = .{
+            .next = self.active_connections,
+            .prev = null,
+            .type = .{
+                .listener = listener_ptr,
+            },
+        };
+
+        if (self.active_connections) |active| {
+            active.prev = listener_conn;
+        }
+        self.active_connections = listener_conn;
 
         const event = kqueue.Kevent{
             .identifier = @intCast(listener_ptr.fd),
@@ -67,7 +116,7 @@ pub const Server = struct {
             .flags = @intFromEnum(kqueue.Flag.Add),
             .fflags = 0,
             .data = 0,
-            .udata = @ptrCast(conn),
+            .udata = @ptrCast(self.active_connections),
         };
 
         _ = try self.kq.kevent(&[_]kqueue.Kevent{event}, false, null);
@@ -84,20 +133,32 @@ pub const Server = struct {
                 if (ev.udata) |raw_ptr| {
                     const conn: *Connection = @ptrCast(@alignCast(raw_ptr));
 
-                    switch (conn.*) {
-                        .listener => {
+                    switch (conn.*.type) {
+                        .listener => |listener| {
                             // listener is ready
 
                             // TODO: use object pool to allocate connections
 
                             // accept connection and pack connection union into udata
-                            const new_socket = try conn.listener.*.accept(true); // TODO: loop until accept would block
+                            const new_socket = try listener.*.accept(true); // TODO: loop until accept would block
                             const new_conn = try self.allocator.create(Connection);
                             const new_client = try Client.create(self.allocator, new_socket);
-                            new_conn.* = .{ .client = new_client };
+
+                            new_conn.* = .{
+                                .next = self.active_connections,
+                                .prev = null,
+                                .type = .{
+                                    .client = new_client,
+                                },
+                            };
+
+                            if (self.active_connections) |active_connections| {
+                                active_connections.prev = new_conn;
+                            }
+                            self.active_connections = new_conn;
 
                             const event = kqueue.Kevent{
-                                .identifier = new_conn.client.socket.fd,
+                                .identifier = new_conn.type.client.socket.fd,
                                 .filter = @intFromEnum(kqueue.Filter.Read),
                                 .flags = @intFromEnum(kqueue.Flag.Add),
                                 .fflags = 0,
@@ -108,7 +169,7 @@ pub const Server = struct {
                             // register event with kq
                             _ = try self.kq.kevent(&[_]kqueue.Kevent{event}, false, null);
                         },
-                        .client => {
+                        .client => |client| {
                             // client is ready
 
                             var should_close = false;
@@ -119,7 +180,7 @@ pub const Server = struct {
 
                             // Read
                             if (kqueue.checkFilter(ev, kqueue.Filter.Read)) {
-                                var reader = &conn.client.reader;
+                                var reader = &client.reader;
 
                                 while (true) {
                                     const isMessageReady = reader.readMessage() catch |err| {
@@ -138,14 +199,14 @@ pub const Server = struct {
                                     const msg = try self.allocator.alloc(u8, msg_length);
                                     try reader.copyMessage(msg);
 
-                                    try conn.client.writer.writeMessage(&self.kq, msg, conn);
+                                    try client.writer.writeMessage(&self.kq, msg, conn);
                                     self.allocator.free(msg);
                                 }
                             }
 
                             // Write
                             if (kqueue.checkFilter(ev, kqueue.Filter.Write)) {
-                                conn.client.writer.flush(&self.kq, conn) catch |err| {
+                                client.writer.flush(&self.kq, conn) catch |err| {
                                     if (err == error.SocketNotConnected or err == error.PipeError) {
                                         should_close = true;
                                     }
@@ -154,9 +215,11 @@ pub const Server = struct {
 
                             // Close connection
                             if (should_close) {
-                                conn.client.deinit();
-                                self.allocator.destroy(conn.client);
-                                self.allocator.destroy(conn);
+                                // conn.removeConnection(&self.active_connections);
+                                //
+                                // client.deinit();
+                                // self.allocator.destroy(client);
+                                // self.allocator.destroy(conn);
                             }
                         },
                     }
@@ -167,8 +230,11 @@ pub const Server = struct {
                 }
             }
         }
+
+        self.deinit();
     }
 
+    /// Stops the server and cleans up
     pub fn stop(self: *Server) void {
         self.running.store(false, .release);
     }
@@ -482,7 +548,7 @@ pub const Writer = struct {
         }
 
         const event = kqueue.Kevent{
-            .identifier = connection.client.socket.fd,
+            .identifier = connection.type.client.socket.fd,
             .filter = @intFromEnum(kqueue.Filter.Write),
             .flags = @intFromEnum(kqueue.Flag.Add),
             .fflags = 0,
@@ -525,7 +591,7 @@ pub const Writer = struct {
 
         // if head is null remove write from kqueue
         const event = kqueue.Kevent{
-            .identifier = connection.client.socket.fd,
+            .identifier = connection.type.client.socket.fd,
             .filter = @intFromEnum(kqueue.Filter.Write),
             .flags = @intFromEnum(kqueue.Flag.Disable),
             .fflags = 0,

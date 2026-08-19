@@ -53,6 +53,8 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/server/main.zig"),
             .target = target,
+            .optimize = optimize,
+            .strip = false,
             .link_libc = true,
         }),
     });
