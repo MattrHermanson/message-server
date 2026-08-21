@@ -268,7 +268,7 @@ pub const Ip4Address = struct {
     addr: u32,
 
     pub fn init(port: u16, address: u32) Ip4Address {
-        var ip4: Ip4Address = .{};
+        var ip4: Ip4Address = undefined;
         ip4.setPort(port);
         ip4.setAddress(address);
         return ip4;
@@ -291,7 +291,7 @@ pub const Ip4Address = struct {
     }
 
     pub fn setAddressWithString(self: *Ip4Address, new_address: []const u8) error{ParseError}!void {
-        if (new_address.len < 8 or new_address.len > 17) {
+        if (new_address.len < 7 or new_address.len > 17) {
             return error.ParseError;
         }
 
@@ -310,14 +310,14 @@ pub const Ip6Address = struct {
     scope_id: u32,
 
     pub fn init(port: u16, address: u128) Ip6Address {
-        var ip6: Ip6Address = .{};
+        var ip6: Ip6Address = undefined;
         ip6.setPort(port);
         ip6.setAddress(address);
         return ip6;
     }
 
     pub fn initWithString(port: u16, address: []const u8) !Ip6Address {
-        var ip6: Ip6Address = .{};
+        var ip6: Ip6Address = undefined;
         ip6.setPort(port);
         try ip6.setAddressWithString(address);
         return ip6;

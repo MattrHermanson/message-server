@@ -6,6 +6,7 @@ const kqueue = @import("kqueue");
 
 const BACKLOG_MAX = 128;
 const KQUEUE_SIZE = 128;
+const GENERAL_TIMEOUT: std.Io.Duration = .fromSeconds(15);
 
 const Connection = struct {
     next: ?*Connection,
@@ -16,19 +17,47 @@ const Connection = struct {
         client: *Client,
     },
 
-    /// assumes nodes are prepended
-    pub fn removeConnection(self: *Connection, head: *?*Connection) void {
-        const next = self.next;
-        const prev = self.prev;
+    timeout: std.Io.Timestamp,
 
-        if (prev) |p| {
-            p.next = next;
-        } else {
-            head.* = next;
+    pub fn deinit(self: *Connection, allocator: std.mem.Allocator) void {
+        switch (self.type) {
+            .listener => |listener| {
+                listener.deinit();
+                allocator.destroy(listener);
+            },
+            .client => |client| {
+                client.deinit();
+                allocator.destroy(client);
+            },
         }
 
-        if (next) |n| {
-            n.prev = prev;
+        allocator.destroy(self);
+    }
+
+    pub fn addToDList(self: *Connection, head: *?*Connection, tail: *?*Connection) void {
+        if (head.* == null) {
+            head.* = self;
+            tail.* = self;
+        } else {
+            if (tail.*) |tail_conn| {
+                tail_conn.next = self;
+                self.prev = tail.*;
+                tail.* = self;
+            }
+        }
+    }
+
+    pub fn removeFromDList(self: *Connection, head: *?*Connection, tail: *?*Connection) void {
+        if (self.prev) |prev| {
+            prev.next = self.next;
+        } else {
+            head.* = self.next;
+        }
+
+        if (self.next) |next| {
+            next.prev = self.prev;
+        } else {
+            tail.* = self.prev;
         }
 
         self.next = null;
@@ -38,37 +67,30 @@ const Connection = struct {
 
 /// To start server, init() -> listen() -> run()
 pub const Server = struct {
+    io: std.Io,
     allocator: std.mem.Allocator,
     kq: kqueue.Kqueue,
     running: std.atomic.Value(bool),
-    active_connections: ?*Connection,
+    head_connection: ?*Connection,
+    tail_connection: ?*Connection,
 
-    pub fn init(allocator: std.mem.Allocator) !Server {
+    pub fn init(io: std.Io, allocator: std.mem.Allocator) !Server {
         return .{
+            .io = io,
             .allocator = allocator,
             .kq = try kqueue.Kqueue.initWithSize(allocator, KQUEUE_SIZE),
             .running = std.atomic.Value(bool).init(true),
-            .active_connections = null,
+            .head_connection = null,
+            .tail_connection = null,
         };
     }
 
     fn deinit(self: *Server) void {
         self.kq.deinit();
 
-        while (self.active_connections) |connection| {
-            switch (connection.type) {
-                .listener => |listener| {
-                    listener.deinit();
-                    self.allocator.destroy(listener);
-                },
-                .client => |client| {
-                    client.deinit();
-                    self.allocator.destroy(client);
-                },
-            }
-
-            self.active_connections = connection.next;
-            self.allocator.destroy(connection);
+        while (self.head_connection) |connection| {
+            self.head_connection = connection.next;
+            connection.deinit(self.allocator);
         }
     }
 
@@ -98,17 +120,16 @@ pub const Server = struct {
         // put listener connection on the heap
         const listener_conn = try self.allocator.create(Connection);
         listener_conn.* = .{
-            .next = self.active_connections,
+            .next = null,
             .prev = null,
             .type = .{
                 .listener = listener_ptr,
             },
+            .timeout = .{ .nanoseconds = 0 },
         };
 
-        if (self.active_connections) |active| {
-            active.prev = listener_conn;
-        }
-        self.active_connections = listener_conn;
+        // add listener to list
+        listener_conn.addToDList(&self.head_connection, &self.tail_connection);
 
         const event = kqueue.Kevent{
             .identifier = @intCast(listener_ptr.fd),
@@ -116,7 +137,7 @@ pub const Server = struct {
             .flags = @intFromEnum(kqueue.Flag.Add),
             .fflags = 0,
             .data = 0,
-            .udata = @ptrCast(self.active_connections),
+            .udata = @ptrCast(listener_conn),
         };
 
         _ = try self.kq.kevent(&[_]kqueue.Kevent{event}, false, null);
@@ -124,9 +145,8 @@ pub const Server = struct {
 
     // HACK: server should handle not return errors
     pub fn run(self: *Server) !void {
-        var timeout = kqueue.Timespec{ .sec = 0, .nsec = 50_000_000 };
-
         while (self.running.load(.acquire)) {
+            var timeout = try self.getTimeout();
             const ready_list = try self.kq.kevent(&.{}, true, &timeout);
 
             for (ready_list) |ev| {
@@ -145,17 +165,17 @@ pub const Server = struct {
                             const new_client = try Client.create(self.allocator, new_socket);
 
                             new_conn.* = .{
-                                .next = self.active_connections,
+                                .next = null,
                                 .prev = null,
                                 .type = .{
                                     .client = new_client,
                                 },
+                                .timeout = .now(self.io, .boot),
                             };
+                            new_conn.timeout = new_conn.timeout.addDuration(GENERAL_TIMEOUT);
 
-                            if (self.active_connections) |active_connections| {
-                                active_connections.prev = new_conn;
-                            }
-                            self.active_connections = new_conn;
+                            // add connection to end of list
+                            new_conn.addToDList(&self.head_connection, &self.tail_connection);
 
                             const event = kqueue.Kevent{
                                 .identifier = new_conn.type.client.socket.fd,
@@ -171,6 +191,12 @@ pub const Server = struct {
                         },
                         .client => |client| {
                             // client is ready
+
+                            // reset timestamp
+                            conn.timeout = .now(self.io, .boot);
+                            conn.timeout = conn.timeout.addDuration(GENERAL_TIMEOUT);
+                            conn.removeFromDList(&self.head_connection, &self.tail_connection);
+                            conn.addToDList(&self.head_connection, &self.tail_connection);
 
                             var should_close = false;
 
@@ -215,11 +241,7 @@ pub const Server = struct {
 
                             // Close connection
                             if (should_close) {
-                                // conn.removeConnection(&self.active_connections);
-                                //
-                                // client.deinit();
-                                // self.allocator.destroy(client);
-                                // self.allocator.destroy(conn);
+                                self.closeConnection(conn);
                             }
                         },
                     }
@@ -237,6 +259,54 @@ pub const Server = struct {
     /// Stops the server and cleans up
     pub fn stop(self: *Server) void {
         self.running.store(false, .release);
+    }
+
+    fn closeConnection(self: *Server, conn: *Connection) void {
+        conn.removeFromDList(&self.head_connection, &self.tail_connection);
+
+        conn.deinit(self.allocator);
+    }
+
+    fn getTimeout(self: *Server) !kqueue.Timespec {
+        const now = std.Io.Timestamp.now(self.io, .boot);
+
+        var node = self.head_connection;
+        while (node) |n| {
+
+            // break for listening sockets
+            if (n.timeout.nanoseconds == 0) {
+                node = n.next;
+                continue;
+            }
+
+            const diff = now.durationTo(n.timeout);
+            if (diff.nanoseconds > 0) {
+                const uns = @as(u96, @intCast(diff.nanoseconds));
+
+                const sec = @as(u64, @intCast(uns / std.time.ns_per_s));
+                const nsec = @as(u64, @intCast(uns % std.time.ns_per_s));
+
+                return .{ .sec = sec, .nsec = nsec };
+            }
+
+            // remove timeouts in the past
+            const event = kqueue.Kevent{
+                .identifier = n.type.client.socket.fd,
+                .filter = @intFromEnum(kqueue.Filter.Read),
+                .flags = @intFromEnum(kqueue.Flag.Delete),
+                .fflags = 0,
+                .data = 0,
+                .udata = @ptrCast(n),
+            };
+
+            // remove event from kq
+            _ = try self.kq.kevent(&[_]kqueue.Kevent{event}, false, null);
+
+            node = n.next;
+            self.closeConnection(n);
+        }
+
+        return .{ .sec = 0, .nsec = 50_000_000 }; // NOTE: this is only here for atomic variable stopping
     }
 };
 

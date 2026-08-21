@@ -40,7 +40,7 @@ pub fn main(init: std.process.Init) !u8 {
     };
 
     // TODO: this is where server stuff will go
-    var sv = try server.Server.init(std.heap.c_allocator);
+    var sv = try server.Server.init(io, std.heap.c_allocator);
 
     try sv.listen(address);
 

@@ -37,12 +37,6 @@ pub const Filter = enum(i16) {
     User = c.EVFILT_USER,
 };
 
-pub const InitError = error{
-    OutOfMemory,
-    TooManyFiles,
-    Unexpected,
-};
-
 pub const Timespec = extern struct {
     sec: u64,
     nsec: u64,
@@ -63,27 +57,27 @@ pub const Kqueue = struct {
     events: []Kevent,
 
     /// Initialize Kqueue with an event buffer of size 1
-    pub fn init(allocator: std.mem.Allocator) InitError!Kqueue {
-        initWithSize(allocator, 1);
+    pub fn init(allocator: std.mem.Allocator) !Kqueue {
+        try initWithSize(allocator, 1);
     }
 
     /// Initialize Kqueue with an arbitrary event buffer size
-    pub fn initWithSize(allocator: std.mem.Allocator, num_events: u32) InitError!Kqueue {
+    pub fn initWithSize(allocator: std.mem.Allocator, num_events: u32) !Kqueue {
         const fd: c_int = c.kqueue();
 
         if (fd == -1) {
             const errno = std.c._errno().*;
 
             return switch (errno) {
-                c.ENOMEM => InitError.OutOfMemory,
-                c.EMFILE => InitError.TooManyFiles,
-                c.ENFILE => InitError.TooManyFiles,
-                else => InitError.Unexpected,
+                c.ENOMEM => error.OutOfMemory,
+                c.EMFILE => error.TooManyFiles,
+                c.ENFILE => error.TooManyFiles,
+                else => error.Unexpected,
             };
         }
 
         const ev = allocator.alloc(Kevent, num_events) catch {
-            return InitError.OutOfMemory;
+            return error.OutOfMemory;
         };
 
         return .{

@@ -8,10 +8,6 @@ const kqueue = @import("kqueue");
 
 // NOTE: |Magic Byte (1)|Version (1)|Opcode (1)|Message Len (3)| - Payload length includes the 6 header bytes
 
-// TODO: Problem: testing servers can't use the same port
-//  Should probably figure out how to make these test run
-//  sequentially, and then fix port clean up (the two fix: leaks in server.zig)
-
 // Testing Parameters
 const ADDRESS = "127.0.0.1";
 const PORT: u16 = 8080;
@@ -131,7 +127,7 @@ test "Slow Reads" {
     // have another thread check that it
 
     // start server
-    var sv = try server.Server.init(ALLOCATOR);
+    var sv = try server.Server.init(IO, ALLOCATOR);
     const address = try net.Address.initIp4WithString(PORT, ADDRESS);
     try sv.listen(address);
     const server_thread = try thread.spawn(.{}, server.Server.run, .{&sv});
@@ -198,7 +194,7 @@ test "Header Pause" {
     // send partial headers then wait
 
     // start server
-    var sv = try server.Server.init(ALLOCATOR);
+    var sv = try server.Server.init(IO, ALLOCATOR);
     const address = try net.Address.initIp4WithString(PORT, ADDRESS);
     try sv.listen(address);
     const server_thread = try thread.spawn(.{}, server.Server.run, .{&sv});
