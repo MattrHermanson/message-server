@@ -36,6 +36,12 @@ pub fn build(b: *std.Build) void {
     // Extracted from inline array to avoid pointer issues
     net_module.addImport("libc", net_translate_c.createModule());
 
+    const threadpool_module = b.createModule(.{
+        .root_source_file = b.path("src/threadpool/threadpool.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const server_module = b.createModule(.{
         .root_source_file = b.path("src/server/server.zig"),
         .target = target,
@@ -61,6 +67,7 @@ pub fn build(b: *std.Build) void {
 
     server_exe.root_module.addImport("net", net_module);
     server_exe.root_module.addImport("kqueue", kqueue_module);
+    server_exe.root_module.addImport("threadpool", threadpool_module);
 
     // Tell the build system to put the compiled binary in the `zig-out/bin` folder
     b.installArtifact(server_exe);
@@ -85,6 +92,12 @@ pub fn build(b: *std.Build) void {
     // ==========================================
     // Testing Configuration
     // ==========================================
+    const threadpool_test_exe = b.addTest(.{
+        .name = "Threadpool-Tests",
+        .root_module = threadpool_module,
+    });
+    b.installArtifact(threadpool_test_exe);
+
     const test_exe = b.addTest(.{
         .name = "Tests",
         .root_module = b.createModule(.{
@@ -96,6 +109,7 @@ pub fn build(b: *std.Build) void {
     test_exe.root_module.addImport("net", net_module);
     test_exe.root_module.addImport("kqueue", kqueue_module);
     test_exe.root_module.addImport("server", server_module);
+    test_exe.root_module.addImport("threadpool", threadpool_module);
 
     b.installArtifact(test_exe);
 
@@ -124,6 +138,8 @@ pub fn build(b: *std.Build) void {
 
     // Server Testing step
     const test_cmd = b.addRunArtifact(test_exe);
+    const threadpool_test_cmd = b.addRunArtifact(threadpool_test_exe);
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&test_cmd.step);
+    test_step.dependOn(&threadpool_test_cmd.step);
 }

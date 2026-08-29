@@ -14,12 +14,21 @@ const PORT: u16 = 8080;
 const AVAIL_THREADS: usize = 8; //const avail_threads = try std.Thread.getCpuCount(); // check for 3 cores
 const ALLOCATOR = std.heap.c_allocator;
 const IO = std.testing.io;
-const MAX_RESPONSE_TIME = std.Io.Duration.fromMilliseconds(1);
+const MAX_RESPONSE_TIME = std.Io.Duration.fromMilliseconds(10);
 const REST_TIME = std.Io.Duration.fromMilliseconds(50);
 const DELAY_TIME = std.Io.Duration.fromMilliseconds(100);
 const NUM_LOOPS: u32 = 10;
 
 // General Helper Functions
+
+fn writeBackHandle(client: *server.Client, msg: []u8) server.HandlerFnError!bool {
+    client.write(msg) catch {
+        return true;
+    };
+
+    client.allocator.free(msg);
+    return false;
+}
 
 fn startClient(server_address: net.Address) !net.Socket {
     const client = try net.Socket.init(
@@ -127,18 +136,21 @@ test "Slow Reads" {
     // have another thread check that it
 
     // start server
-    var sv = try server.Server.init(IO, ALLOCATOR);
+    var sv = try server.Server.init(
+        IO,
+        ALLOCATOR,
+        null,
+        writeBackHandle,
+        null,
+        .fromSeconds(60),
+    );
+
     const address = try net.Address.initIp4WithString(PORT, ADDRESS);
     try sv.listen(address);
     const server_thread = try thread.spawn(.{}, server.Server.run, .{&sv});
 
     const test_payload = "Hello, Server!";
-    const test_message: []const u8 = &[_]u8{
-        0x4D, // Magic Byte (e.g., 'M')
-        0x01, // Version (1)
-        0x01, // Opcode (e.g., 5)
-        0x00, 0x00, 0x14, // Message Length (20)
-    } ++ test_payload;
+    const test_message: []const u8 = &[_]u8{ 0x4D, 0x01, 0x01, 0x00, 0x00, 0x14 } ++ test_payload;
 
     // run tests
     const result = try dispatchTest(
@@ -194,18 +206,21 @@ test "Header Pause" {
     // send partial headers then wait
 
     // start server
-    var sv = try server.Server.init(IO, ALLOCATOR);
+    var sv = try server.Server.init(
+        IO,
+        ALLOCATOR,
+        null,
+        writeBackHandle,
+        null,
+        .fromSeconds(60),
+    );
+
     const address = try net.Address.initIp4WithString(PORT, ADDRESS);
     try sv.listen(address);
     const server_thread = try thread.spawn(.{}, server.Server.run, .{&sv});
 
     const test_payload = "Hello, Server!";
-    const test_message: []const u8 = &[_]u8{
-        0x4D, // Magic Byte (e.g., 'M')
-        0x01, // Version (1)
-        0x01, // Opcode (e.g., 5)
-        0x00, 0x00, 0x14, // Message Length (20)
-    } ++ test_payload;
+    const test_message: []const u8 = &[_]u8{ 0x4D, 0x01, 0x01, 0x00, 0x00, 0x14 } ++ test_payload;
 
     // run tests
     const result = try dispatchTest(

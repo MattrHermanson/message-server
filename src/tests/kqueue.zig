@@ -14,9 +14,18 @@ const IO = std.testing.io;
 const MAX_RESPONSE_TIME = std.Io.Duration.fromMilliseconds(1);
 const REST_TIME = std.Io.Duration.fromMilliseconds(500);
 const DELAY_TIME = std.Io.Duration.fromMilliseconds(100);
-const TIMEOUT_SECS: i64 = 15;
+const TIMEOUT_SECS: i64 = 5;
 
 // General Helper Functions
+
+fn writeBackHandle(client: *server.Client, msg: []u8) server.HandlerFnError!bool {
+    client.write(msg) catch {
+        return true;
+    };
+
+    client.allocator.free(msg);
+    return false;
+}
 
 fn startClient(server_address: net.Address) !net.Socket {
     const client = try net.Socket.init(
@@ -90,7 +99,15 @@ test "Simple Timeout" {
     // the other waits out the timeout then tests for correct write errors
 
     // start server
-    var sv = try server.Server.init(IO, ALLOCATOR);
+    var sv = try server.Server.init(
+        IO,
+        ALLOCATOR,
+        null,
+        writeBackHandle,
+        null,
+        .fromSeconds(TIMEOUT_SECS),
+    );
+
     const address = try net.Address.initIp4WithString(PORT, ADDRESS);
     try sv.listen(address);
     const server_thread = try thread.spawn(.{}, server.Server.run, .{&sv});
@@ -109,7 +126,6 @@ test "Simple Timeout" {
     // run tester
     const to_client = try startClient(address);
 
-    // NOTE: Sleep is hardcoded for timeout in src/server/server.zig
     try std.Io.sleep(IO, .fromSeconds(TIMEOUT_SECS + 2), .boot);
     _ = try net.write(to_client.fd, test_message);
 
@@ -150,22 +166,30 @@ test "Complex Timeout" {
     const test_message: []const u8 = &[_]u8{ 0x4D, 0x01, 0x01, 0x00, 0x00, 0x14 } ++ test_payload;
 
     // start server
-    var sv = try server.Server.init(IO, ALLOCATOR);
+    var sv = try server.Server.init(
+        IO,
+        ALLOCATOR,
+        null,
+        writeBackHandle,
+        null,
+        .fromSeconds(TIMEOUT_SECS),
+    );
+
     const address = try net.Address.initIp4WithString(PORT, ADDRESS);
     try sv.listen(address);
     const server_thread = try thread.spawn(.{}, server.Server.run, .{&sv});
 
     const client1 = try startClient(address);
 
-    try std.Io.sleep(IO, .fromSeconds(2), .boot);
+    try std.Io.sleep(IO, .fromSeconds(1), .boot);
 
     const client2 = try startClient(address);
 
-    try std.Io.sleep(IO, .fromSeconds(8), .boot);
+    try std.Io.sleep(IO, .fromSeconds(3), .boot);
 
     _ = try net.write(client1.fd, test_message);
 
-    try std.Io.sleep(IO, .fromSeconds(8), .boot);
+    try std.Io.sleep(IO, .fromSeconds(4), .boot);
 
     // test client 2
     _ = try net.write(client2.fd, test_message);

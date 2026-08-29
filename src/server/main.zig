@@ -1,6 +1,7 @@
 const std = @import("std");
 const net = @import("net");
 const server = @import("server.zig");
+const Threadpool = @import("threadpool").Threadpool;
 
 pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
@@ -22,11 +23,11 @@ pub fn main(init: std.process.Init) !u8 {
 
     const port = validate_port(port_str) catch |err| {
         switch (err) {
-            PortError.InvalidNumber => {
+            error.InvalidNumber => {
                 try writer.print("Invalid Port Number\n", .{});
                 try writer.flush();
             },
-            PortError.WellKnownPort => {
+            error.WellKnownPort => {
                 try writer.print("Invalid Port Number. Cannot use a well-known port\n", .{});
                 try writer.flush();
             },
@@ -39,8 +40,23 @@ pub fn main(init: std.process.Init) !u8 {
         return 1;
     };
 
-    // TODO: this is where server stuff will go
-    var sv = try server.Server.init(io, std.heap.c_allocator);
+    // FIX: remove this -- here for ref'ing test suite in Threadpool
+    var thrd_pool = try Threadpool.create(
+        io,
+        std.heap.c_allocator,
+        try std.Thread.getCpuCount(),
+    );
+    thrd_pool.destroy();
+
+    // TODO: create setup, handle, and onComplete functions
+    var sv = try server.Server.init(
+        io,
+        std.heap.c_allocator,
+        null,
+        handle,
+        null,
+        .fromSeconds(60),
+    );
 
     try sv.listen(address);
 
@@ -52,22 +68,36 @@ pub fn main(init: std.process.Init) !u8 {
 }
 
 // Validate Port Number
-const PortError = error{
-    InvalidNumber,
-    WellKnownPort,
-};
-
-fn validate_port(port_str: []const u8) PortError!u16 {
+fn validate_port(port_str: []const u8) !u16 {
 
     // parse string to u16
     const port = std.fmt.parseInt(u16, port_str, 10) catch {
-        return PortError.InvalidNumber;
+        return error.InvalidNumber;
     };
 
     // validate well-known ports
     if (port < 1024) {
-        return PortError.WellKnownPort;
+        return error.WellKnownPort;
     }
 
     return port;
 }
+
+// TODO: test this server abstractions
+// implement thread pool
+
+//fn setup(client: *server.Client) void {}
+
+fn handle(client: *server.Client, msg: []u8) server.HandlerFnError!bool {
+    defer client.allocator.free(msg);
+
+    client.write(msg) catch |err| {
+        std.debug.print("error: {}", .{err});
+        return true;
+    };
+
+    std.debug.print("msg {s}\n", .{msg});
+    return false;
+}
+
+//fn onComplete(client: *server.Client) server.HandlerFnError!bool {}

@@ -83,6 +83,8 @@ pub const Socket = struct {
         };
     }
 
+    // FIX: need to shutdown write side then read all
+    // then close
     pub fn deinit(self: Socket) void {
         _ = std.c.close(@intCast(self.fd));
     }

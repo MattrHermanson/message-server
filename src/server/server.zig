@@ -2,11 +2,8 @@ const std = @import("std");
 const net = @import("net");
 const kqueue = @import("kqueue");
 
-// NOTE: current goal -> be able to handle N clients with a kqueue
-
 const BACKLOG_MAX = 128;
 const KQUEUE_SIZE = 128;
-const GENERAL_TIMEOUT: std.Io.Duration = .fromSeconds(15);
 
 const Connection = struct {
     next: ?*Connection,
@@ -65,7 +62,21 @@ const Connection = struct {
     }
 };
 
+pub const HandlerFnError = error{
+    Unrecoverable,
+};
+
 /// To start server, init() -> listen() -> run()
+/// setup() is run when the connection is accepted
+/// handle() runs whenever a complete message has been received, caller is
+///     responsible for freeing msg when done with is using client.allocator.free()
+/// onComplete() gets called when EVFILT_USER is triggered. It can be used
+///     to do something after asynchronous work, dispatched from handle(),
+///     is finished
+/// Handler functions can return true to close that client's connection as
+///     a result of intented behavior
+/// Handler functions can return HandlerFnError.Unrecoverable to close a
+///     a connection as a result of an unrecoverable error
 pub const Server = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -73,8 +84,19 @@ pub const Server = struct {
     running: std.atomic.Value(bool),
     head_connection: ?*Connection,
     tail_connection: ?*Connection,
+    setup: ?*const fn (client: *Client) void,
+    handle: *const fn (client: *Client, msg: []u8) HandlerFnError!bool,
+    onComplete: ?*const fn (client: *Client) HandlerFnError!bool,
+    timeout: std.Io.Duration,
 
-    pub fn init(io: std.Io, allocator: std.mem.Allocator) !Server {
+    pub fn init(
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        setup: ?*const fn (client: *Client) void,
+        handle: *const fn (client: *Client, msg: []u8) HandlerFnError!bool,
+        onComplete: ?*const fn (client: *Client) HandlerFnError!bool,
+        timeout: std.Io.Duration,
+    ) !Server {
         return .{
             .io = io,
             .allocator = allocator,
@@ -82,6 +104,10 @@ pub const Server = struct {
             .running = std.atomic.Value(bool).init(true),
             .head_connection = null,
             .tail_connection = null,
+            .setup = setup,
+            .handle = handle,
+            .onComplete = onComplete,
+            .timeout = timeout,
         };
     }
 
@@ -162,7 +188,12 @@ pub const Server = struct {
                             // accept connection and pack connection union into udata
                             const new_socket = try listener.*.accept(true); // TODO: loop until accept would block
                             const new_conn = try self.allocator.create(Connection);
-                            const new_client = try Client.create(self.allocator, new_socket);
+                            const new_client = try Client.create(
+                                self.allocator,
+                                new_conn,
+                                new_socket,
+                                &self.kq,
+                            );
 
                             new_conn.* = .{
                                 .next = null,
@@ -172,7 +203,7 @@ pub const Server = struct {
                                 },
                                 .timeout = .now(self.io, .boot),
                             };
-                            new_conn.timeout = new_conn.timeout.addDuration(GENERAL_TIMEOUT);
+                            new_conn.timeout = new_conn.timeout.addDuration(self.timeout);
 
                             // add connection to end of list
                             new_conn.addToDList(&self.head_connection, &self.tail_connection);
@@ -186,6 +217,10 @@ pub const Server = struct {
                                 .udata = @ptrCast(new_conn),
                             };
 
+                            if (self.setup) |setup| {
+                                setup(new_client);
+                            }
+
                             // register event with kq
                             _ = try self.kq.kevent(&[_]kqueue.Kevent{event}, false, null);
                         },
@@ -194,7 +229,7 @@ pub const Server = struct {
 
                             // reset timestamp
                             conn.timeout = .now(self.io, .boot);
-                            conn.timeout = conn.timeout.addDuration(GENERAL_TIMEOUT);
+                            conn.timeout = conn.timeout.addDuration(self.timeout);
                             conn.removeFromDList(&self.head_connection, &self.tail_connection);
                             conn.addToDList(&self.head_connection, &self.tail_connection);
 
@@ -206,10 +241,8 @@ pub const Server = struct {
 
                             // Read
                             if (kqueue.checkFilter(ev, kqueue.Filter.Read)) {
-                                var reader = &client.reader;
-
                                 while (true) {
-                                    const isMessageReady = reader.readMessage() catch |err| {
+                                    const message = client.read() catch |err| {
                                         switch (err) {
                                             error.ConnectionClosed, error.ConnectionReset => {
                                                 should_close = true;
@@ -219,20 +252,27 @@ pub const Server = struct {
                                         }
                                     };
 
-                                    if (!isMessageReady) break;
+                                    // handle message or break because all msgs are read
+                                    if (message) |msg| {
+                                        should_close = should_close or self.handle(client, msg) catch true;
 
-                                    const msg_length = try reader.getMessageLength();
-                                    const msg = try self.allocator.alloc(u8, msg_length);
-                                    try reader.copyMessage(msg);
+                                        // try client.write(msg);
+                                        // self.allocator.free(msg);  TODO: might still want to free this here
 
-                                    try client.writer.writeMessage(&self.kq, msg, conn);
-                                    self.allocator.free(msg);
+                                    } else break;
+                                }
+                            }
+
+                            // User
+                            if (self.onComplete) |onComplete| {
+                                if (kqueue.checkFilter(ev, kqueue.Filter.User)) {
+                                    should_close = should_close or onComplete(client) catch true;
                                 }
                             }
 
                             // Write
                             if (kqueue.checkFilter(ev, kqueue.Filter.Write)) {
-                                client.writer.flush(&self.kq, conn) catch |err| {
+                                client.flush() catch |err| {
                                     if (err == error.SocketNotConnected or err == error.PipeError) {
                                         should_close = true;
                                     }
@@ -311,30 +351,35 @@ pub const Server = struct {
 };
 
 pub const Client = struct {
-    socket: net.Socket,
+    allocator: std.mem.Allocator,
 
-    alloc: std.mem.Allocator,
+    conn: *Connection,
+    socket: net.Socket,
+    kq: *kqueue.Kqueue,
 
     reader: Reader,
     writer: Writer,
 
-    // could put timeout linked list nodes here
+    udata: ?*anyopaque, // will NOT be modified by any internal code
 
-    pub fn init(allocator: std.mem.Allocator, socket: net.Socket) !Client {
+    pub fn init(allocator: std.mem.Allocator, conn: *Connection, socket: net.Socket, kq: *kqueue.Kqueue) !Client {
         const reader = try Reader.init(allocator, socket.fd, 4096);
         const writer = Writer.init(allocator, socket.fd);
 
         return .{
+            .allocator = allocator,
+            .conn = conn,
             .socket = socket,
-            .alloc = allocator,
+            .kq = kq,
             .reader = reader,
             .writer = writer,
+            .udata = null,
         };
     }
 
-    pub fn create(allocator: std.mem.Allocator, socket: net.Socket) !*Client {
+    pub fn create(allocator: std.mem.Allocator, conn: *Connection, socket: net.Socket, kq: *kqueue.Kqueue) !*Client {
         const client = try allocator.create(Client);
-        client.* = try init(allocator, socket);
+        client.* = try init(allocator, conn, socket, kq);
         return client;
     }
 
@@ -342,6 +387,45 @@ pub const Client = struct {
         self.reader.deinit();
         self.writer.deinit();
         self.socket.deinit();
+    }
+
+    /// Dispatches a user signal for this client
+    pub fn signal(self: Client) void {
+        // TODO: To actually trigger the event, you typically need to pass NOTE_TRIGGER (often 0x01)
+        // to fflags depending on your specific kqueue wrapper's implementation
+        const event = kqueue.Kevent{
+            .identifier = self.socket.fd,
+            .filter = @intFromEnum(kqueue.Filter.User),
+            .flags = @intFromEnum(kqueue.Flag.Add) | @intFromEnum(kqueue.Flag.Clear),
+            .fflags = 0,
+            .data = 0,
+            .udata = @ptrCast(self.conn),
+        };
+
+        // Register the event with kqueue
+        _ = self.kq.kevent(&[_]kqueue.Kevent{event}, false, null) catch |err| {
+            std.debug.print("Failed to register user event: {}\n", .{err});
+        };
+    }
+
+    // IDEA: could return a message with header fields and body split
+    pub fn read(self: *Client) !?[]u8 {
+        const isMessageReady = try self.reader.readMessage();
+
+        if (!isMessageReady) return null;
+
+        const msg_length = try self.reader.getMessageLength();
+        const msg = try self.allocator.alloc(u8, msg_length);
+        try self.reader.copyMessage(msg);
+        return msg;
+    }
+
+    pub fn write(self: *Client, msg: []const u8) !void {
+        try self.writer.writeMessage(self.kq, msg, self.conn);
+    }
+
+    pub fn flush(self: *Client) !void {
+        try self.writer.flush(self.kq, self.conn);
     }
 };
 
