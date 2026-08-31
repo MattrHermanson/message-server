@@ -99,7 +99,7 @@ test "Simple Timeout" {
     // the other waits out the timeout then tests for correct write errors
 
     // start server
-    var sv = try server.Server.init(
+    var sv = try server.Server.init( // TODO: add init params
         IO,
         ALLOCATOR,
         null,

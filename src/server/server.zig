@@ -5,6 +5,11 @@ const kqueue = @import("kqueue");
 const BACKLOG_MAX = 128;
 const KQUEUE_SIZE = 128;
 
+// TODO: let setup return an error, so server can close conn
+//          if layer above isn't able to do what it needs todo
+// TODO: remove Opcode from header
+// BUG: udata in Client does not get free on close
+
 const Connection = struct {
     next: ?*Connection,
     prev: ?*Connection,
@@ -84,18 +89,20 @@ pub const Server = struct {
     running: std.atomic.Value(bool),
     head_connection: ?*Connection,
     tail_connection: ?*Connection,
-    setup: ?*const fn (client: *Client) void,
-    handle: *const fn (client: *Client, msg: []u8) HandlerFnError!bool,
-    onComplete: ?*const fn (client: *Client) HandlerFnError!bool,
+    setup: ?*const fn (udata: ?*anyopaque, client: *Client) HandlerFnError!void,
+    handle: *const fn (udata: ?*anyopaque, client: *Client, msg: []u8) HandlerFnError!bool,
+    onComplete: ?*const fn (udata: ?*anyopaque, client: *Client) HandlerFnError!bool,
     timeout: std.Io.Duration,
+    udata: ?*anyopaque, // will NOT be modified by any internal code
 
     pub fn init(
         io: std.Io,
         allocator: std.mem.Allocator,
-        setup: ?*const fn (client: *Client) void,
-        handle: *const fn (client: *Client, msg: []u8) HandlerFnError!bool,
-        onComplete: ?*const fn (client: *Client) HandlerFnError!bool,
+        setup: ?*const fn (udata: ?*anyopaque, client: *Client) HandlerFnError!void,
+        handle: *const fn (udata: ?*anyopaque, client: *Client, msg: []u8) HandlerFnError!bool,
+        onComplete: ?*const fn (udata: ?*anyopaque, client: *Client) HandlerFnError!bool,
         timeout: std.Io.Duration,
+        udata: ?*anyopaque,
     ) !Server {
         return .{
             .io = io,
@@ -108,6 +115,7 @@ pub const Server = struct {
             .handle = handle,
             .onComplete = onComplete,
             .timeout = timeout,
+            .udata = udata,
         };
     }
 
@@ -218,7 +226,9 @@ pub const Server = struct {
                             };
 
                             if (self.setup) |setup| {
-                                setup(new_client);
+                                setup(self.udata, new_client) catch {
+                                    // FIX: need to close connection here
+                                };
                             }
 
                             // register event with kq
@@ -254,11 +264,7 @@ pub const Server = struct {
 
                                     // handle message or break because all msgs are read
                                     if (message) |msg| {
-                                        should_close = should_close or self.handle(client, msg) catch true;
-
-                                        // try client.write(msg);
-                                        // self.allocator.free(msg);  TODO: might still want to free this here
-
+                                        should_close = should_close or self.handle(self.udata, client, msg) catch true;
                                     } else break;
                                 }
                             }
@@ -266,7 +272,7 @@ pub const Server = struct {
                             // User
                             if (self.onComplete) |onComplete| {
                                 if (kqueue.checkFilter(ev, kqueue.Filter.User)) {
-                                    should_close = should_close or onComplete(client) catch true;
+                                    should_close = should_close or onComplete(self.udata, client) catch true;
                                 }
                             }
 
@@ -420,8 +426,16 @@ pub const Client = struct {
         return msg;
     }
 
-    pub fn write(self: *Client, msg: []const u8) !void {
-        try self.writer.writeMessage(self.kq, msg, self.conn);
+    pub fn write(self: *Client, opcode: u8, msg: []const u8) !void {
+        const msg_len: u24 = @intCast(msg.len);
+        var header: [6]u8 = undefined;
+
+        header[0] = 0x4D;
+        header[1] = 0x01;
+        header[2] = opcode;
+        std.mem.writeInt(u24, header[3..], msg_len + 6, .big);
+
+        try self.writer.writeMessage(self.kq, header[0..], msg, self.conn);
     }
 
     pub fn flush(self: *Client) !void {
@@ -651,7 +665,7 @@ pub const Reader = struct {
 // - takes kqueue to unregister socket for write notifs
 
 const OutMsg = struct {
-    data: []const u8,
+    data: []u8,
     sent_bytes: usize = 0,
     next: ?*OutMsg = null,
 };
@@ -683,11 +697,14 @@ pub const Writer = struct {
 
     /// pushes messages to the queue, msg must have a correctly formatted header
     /// msg will be copied internally, caller is responsible for freeing the buffer passed in
-    pub fn writeMessage(self: *Writer, kq: *kqueue.Kqueue, msg: []const u8, connection: *Connection) !void {
+    pub fn writeMessage(self: *Writer, kq: *kqueue.Kqueue, header: []u8, msg: []const u8, connection: *Connection) !void {
 
         // TODO: use object pool for messages
         const new_out_msg = try self.allocator.create(OutMsg);
-        new_out_msg.data = try self.allocator.dupe(u8, msg);
+        new_out_msg.data = try self.allocator.alloc(u8, msg.len + 6);
+        @memcpy(new_out_msg.data[0..6], header);
+        @memcpy(new_out_msg.data[6..], msg);
+
         new_out_msg.sent_bytes = 0;
         new_out_msg.next = null;
 
