@@ -1,5 +1,6 @@
 const std = @import("std");
 const net = @import("net");
+const Allocator = std.mem.Allocator;
 const server = @import("server.zig");
 const Threadpool = @import("threadpool").Threadpool;
 
@@ -7,19 +8,20 @@ const X25519 = std.crypto.dh.X25519;
 const Chacha20 = std.crypto.aead.chacha_poly.ChaCha20Poly1305;
 const Sha512 = std.crypto.kdf.hkdf.HkdfSha256;
 
-// Validate Port Number
-fn validate_port(port_str: []const u8) !u16 {
+const ALLOCATOR = std.heap.c_allocator;
 
-    // parse string to u16
-    const port = std.fmt.parseInt(u16, port_str, 10) catch {
-        return error.InvalidNumber;
-    };
+const Opcodes = enum(u8) {
+    Handshake = 0x01,
+    Authenticate,
 
-    // validate well-known ports
-    if (port < 1024) {
-        return error.WellKnownPort;
+    fn check(num: u8, code: Opcodes) bool {
+        return num == @intFromEnum(code);
     }
+};
 
+fn validate_port(port_str: []const u8) !u16 {
+    const port = try std.fmt.parseInt(u16, port_str, 10);
+    if (port < 1024) return error.WellKnownPort;
     return port;
 }
 
@@ -29,34 +31,23 @@ pub fn main(init: std.process.Init) !u8 {
     var args = init.minimal.args.iterate();
     _ = args.skip();
 
-    // stdout boilerplate
-    var buf: [512]u8 = undefined;
-    var file_writer = std.Io.File.stdout().writerStreaming(io, &buf);
-    var writer = &file_writer.interface;
-
     // validate port number
     const port_str = args.next() orelse {
-        try writer.print("Usage $server [port]\n", .{});
-        try writer.flush();
+        std.debug.print("Usage $server [port]\n", .{});
         return 1;
     };
 
     const port = validate_port(port_str) catch |err| {
         switch (err) {
-            error.InvalidNumber => {
-                try writer.print("Invalid Port Number\n", .{});
-                try writer.flush();
-            },
-            error.WellKnownPort => {
-                try writer.print("Invalid Port Number. Cannot use a well-known port\n", .{});
-                try writer.flush();
-            },
+            error.WellKnownPort => std.debug.print("Invalid Port Number. Cannot use a well-known port\n", .{}),
+            else => std.debug.print("Invalid Port Number\n", .{}),
         }
+
         return 1;
     };
 
-    const address: net.Address = net.Address.initIp4WithString(port, "127.0.0.1") catch {
-        // TODO: print error
+    const address: net.Address = net.Address.initIp4WithString(port, "127.0.0.1") catch |err| {
+        std.debug.print("Address Error, {}\n", .{err});
         return 1;
     };
 
@@ -67,7 +58,7 @@ pub fn main(init: std.process.Init) !u8 {
     // );
     // thrd_pool.destroy();
 
-    // TODO: generate salt here and include it in the server's udata
+    // TODO: pick better salt
     const keys = X25519.KeyPair.generate(io);
     var salt = [_]u8{ 0x12, 0x34, 0x56, 0x78 };
 
@@ -78,7 +69,7 @@ pub fn main(init: std.process.Init) !u8 {
 
     var sv = try server.Server.init(
         io,
-        std.heap.c_allocator,
+        ALLOCATOR,
         setup,
         handle,
         null,
@@ -95,27 +86,20 @@ pub fn main(init: std.process.Init) !u8 {
     return 0;
 }
 
-// TODO: make file/enum with opcodes
-
 // setup func level client structs and send server's pub key
 fn setup(udata: ?*anyopaque, client: *server.Client) server.HandlerFnError!void {
-    client.udata = std.heap.c_allocator.create(Client) catch {
-        return error.Unrecoverable;
-    };
+    client.udata = ALLOCATOR.create(Client) catch return error.Unrecoverable;
 
     if (client.udata) |raw_ptr| {
-        const clnt: *Client = @ptrCast(@alignCast(raw_ptr));
-
-        clnt.status = .New;
-
-        // send server's pub key
         if (udata) |raw_udata_ptr| {
+            const clnt: *Client = @ptrCast(@alignCast(raw_ptr));
             const state: *ServerState = @ptrCast(@alignCast(raw_udata_ptr));
 
-            // send pub key
-            client.write(0x1, &state.keys.public_key) catch {
-                return;
-            };
+            clnt.status = .New;
+
+            // send server's pub key
+            client.write(0x1, &state.keys.public_key) catch return;
+            // TODO: what should hap when pub key doesn't get sent??
         }
     }
 }
@@ -129,19 +113,11 @@ fn handle(udata: ?*anyopaque, client: *server.Client, msg: []u8) server.HandlerF
             const clnt: *Client = @ptrCast(@alignCast(raw_ptr));
             const state: *ServerState = @ptrCast(@alignCast(raw_udata_ptr));
 
-            // don't continue if secure connection not established
+            // don't continue if secure connection & authentication not established
             if (!try securityHandler(clnt, state, msg)) return false;
 
-            const decrypted_msg = client.allocator.alloc(u8, msg.len - 34) catch return error.Unrecoverable;
-
-            const tag = msg[18..34];
-            const nonce = msg[6..18];
-
-            Chacha20.decrypt(decrypted_msg, msg[34..], tag.*, &[_]u8{}, nonce.*, clnt.key[0..32].*) catch {
-                // TODO: send error message
-                std.debug.print("decrypt error\n", .{});
-
-                return false;
+            const decrypted_msg = decrypt(client.allocator, clnt, msg) catch {
+                return error.Unrecoverable;
             };
 
             std.debug.print("Encrypted msg: {s}\n", .{msg});
@@ -152,13 +128,16 @@ fn handle(udata: ?*anyopaque, client: *server.Client, msg: []u8) server.HandlerF
     } else return error.Unrecoverable;
 }
 
+//fn onComplete(udata: ?*anyopaque, client: *server.Client) server.HandlerFnError!bool {}
+
+// returns true/false if server code should continue
 fn securityHandler(client: *Client, state: *ServerState, msg: []u8) server.HandlerFnError!bool {
     switch (client.status) {
         .New => {
             var client_pub_key: [32]u8 = undefined;
 
             // check opcode
-            if (msg[2] == 0x01) {
+            if (Opcodes.check(msg[2], .Handshake)) {
                 @memcpy(&client_pub_key, msg[6..38]);
 
                 // compute shared secret
@@ -178,25 +157,17 @@ fn securityHandler(client: *Client, state: *ServerState, msg: []u8) server.Handl
             return false;
         },
         .Established => {
-            if (msg[2] == 0x02) {
+            if (Opcodes.check(msg[2], .Authenticate)) {
                 // receive user and password
                 return true; // TODO: implement passwd handling, this is for testing
 
             } else {
-                // TODO: send Error Not Authenticated
-                return false;
+                return false; // TODO: send Error Not Authenticated
             }
         },
         .Authenticated => return true,
     }
 }
-
-//fn onComplete(udata: ?*anyopaque, client: *server.Client) server.HandlerFnError!bool {}
-
-// Key Exchange: client & server generate X25519 key pairs. Send their public_key to each other.
-// Shared Secret: Both parties run X25519.scalarmult() w/ their secret key and other party's public key.
-// Key Derivation: Hash shared secret to produce a secure symmetric key.
-// Authenticated Encryption: Use ChaCha20-Poly1305 to encrypt and decrypt data using the derived key.
 
 const ServerState = struct {
     keys: X25519.KeyPair,
@@ -213,3 +184,28 @@ const Client = struct {
     status: Status,
     key: []u8,
 };
+
+/// returns a message that is encrypted with nonce & tag prepended
+/// note: nonce must be incremented after calling
+fn encrypt(allocator: Allocator, unencrypted_msg: []u8, nonce: [12]u8, key: [32]u8) ![]u8 {
+    // TODO: check network byte order
+    var encrypted_msg: []u8 = allocator.alloc(u8, unencrypted_msg.len + 28);
+    var tag: [16]u8 = undefined;
+
+    Chacha20.encrypt(&encrypted_msg[28..], &tag, unencrypted_msg, &[_]u8{}, nonce, key);
+
+    @memcpy(encrypted_msg, nonce);
+    @memcpy(encrypted_msg[12..], tag);
+    return encrypted_msg;
+}
+
+fn decrypt(allocator: Allocator, client: *Client, encrypted_msg: []u8) ![]u8 {
+    const decrypted_msg = try allocator.alloc(u8, encrypted_msg.len - 34);
+
+    const tag: [16]u8 = encrypted_msg[18..34].*;
+    const nonce: [12]u8 = encrypted_msg[6..18].*;
+
+    try Chacha20.decrypt(decrypted_msg, encrypted_msg[34..], tag, &[_]u8{}, nonce, client.key[0..32].*);
+
+    return decrypted_msg;
+}
