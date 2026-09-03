@@ -42,6 +42,22 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const db_translate_c = b.addTranslateC(.{
+        .root_source_file = b.path("src/db/c.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    db_translate_c.linkSystemLibrary("sqlite3", .{});
+
+    const db_module = b.createModule(.{
+        .root_source_file = b.path("src/db/db.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    db_module.linkSystemLibrary("sqlite3", .{});
+    db_module.addImport("libc", db_translate_c.createModule());
+
     const server_module = b.createModule(.{
         .root_source_file = b.path("src/server/server.zig"),
         .target = target,
@@ -68,6 +84,7 @@ pub fn build(b: *std.Build) void {
     server_exe.root_module.addImport("net", net_module);
     server_exe.root_module.addImport("kqueue", kqueue_module);
     server_exe.root_module.addImport("threadpool", threadpool_module);
+    server_exe.root_module.addImport("db", db_module);
 
     // Tell the build system to put the compiled binary in the `zig-out/bin` folder
     b.installArtifact(server_exe);

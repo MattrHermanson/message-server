@@ -6,15 +6,9 @@
 
 1. A server handles requests from a small range of connections (2 - 1000)
 2. Clients login and can view incoming messages and send messages to other users
-3. No authentication
-4. Messages can be any length
-5. Maybe provide user search functionality
-6. Maybe make script or program to test client load
-
-### Plan
-
-    Server starts, spawns threads for thread pool. Accept connections then hand
-    off to workers.
+3. Messages can be any length
+4. Maybe provide user search functionality
+5. Maybe make script or program to test client load
 
 ### Things to Consider
 
@@ -40,10 +34,6 @@
     +-------+----------+-------------+
     |Tag (1)|Length (2)|Data (Length)|
     +-------+----------+-------------+
-
-### Things to Research
-
-* Async stuff in Zig
 
 ### Implementation Plan
 
@@ -78,16 +68,6 @@
 * Implement the Payload Decoder: Write the logic to read the rest of the message
     and parse the specific fields, ensuring you enforce a consistent byte order
     across different devices.  
-
-#### Phase 4: Low-Level Storage Engine
-
-* Initialize the Storage Medium: Set up the physical files or memory mappings
-    that will hold your chat data.
-* Build the In-Memory Index: Create the data structure that maps message IDs to
-    their physical disk coordinates. Write a startup routine that loads existing
-    data into this index.
-* Write the I/O Handlers: Create the specific read and write functions that your
-    background thread pool will execute when saving or retrieving messages.
 
 #### Phase 5: Connecting the Chat Logic
 

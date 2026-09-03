@@ -3,12 +3,18 @@ const net = @import("net");
 const Allocator = std.mem.Allocator;
 const server = @import("server.zig");
 const Threadpool = @import("threadpool").Threadpool;
+const db = @import("db");
 
 const X25519 = std.crypto.dh.X25519;
 const Chacha20 = std.crypto.aead.chacha_poly.ChaCha20Poly1305;
 const Sha512 = std.crypto.kdf.hkdf.HkdfSha256;
 
 const ALLOCATOR = std.heap.c_allocator;
+
+// TODO:
+// 1. audit this for net-byte-order mistakes
+// 2. clean up client and add functions for start up and handshake
+// 3. setup sqlite
 
 const Opcodes = enum(u8) {
     Handshake = 0x01,
@@ -66,6 +72,10 @@ pub fn main(init: std.process.Init) !u8 {
         .keys = keys,
         .salt = salt[0..],
     };
+
+    //var database = try db.init(io, ALLOCATOR, "./store.db", "./src/sql/setup.sql");
+
+    //try database.deinit();
 
     var sv = try server.Server.init(
         io,
@@ -194,7 +204,7 @@ fn encrypt(allocator: Allocator, unencrypted_msg: []u8, nonce: [12]u8, key: [32]
 
     Chacha20.encrypt(&encrypted_msg[28..], &tag, unencrypted_msg, &[_]u8{}, nonce, key);
 
-    @memcpy(encrypted_msg, nonce);
+    @memcpy(encrypted_msg, nonce); // dont this this is in net byte order
     @memcpy(encrypted_msg[12..], tag);
     return encrypted_msg;
 }
