@@ -93,6 +93,8 @@ pub const Database = struct {
         if (c.sqlite3_bind_blob(stmt, 2, pwd_hash.ptr, @intCast(pwd_hash.len), null) != c.SQLITE_OK) return error.BindError;
 
         // TODO: refactor this ugly switch
+        // TODO: add error for SQLITE_CONSTRAINT error when duplicate usernames & other bad
+        //          inserts happen
         switch (c.sqlite3_step(stmt)) {
             c.SQLITE_DONE => return,
             c.SQLITE_BUSY => return error.Busy,

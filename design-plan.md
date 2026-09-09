@@ -27,13 +27,23 @@
 
     Fixed Header Format (6 Bytes) - Max 16Mb
     +--------------+-----------+----------+---------------+
-    |Magic Byte (1)|Version (1)|Opcode (1)|Payload Len (3)|
+    |Magic Byte (1)|Version (1)|Opcode (1)|Message Len (3)|
     +--------------+-----------+----------+---------------+
 
     Payload Format (TLV) - Max 65K
-    +-------+----------+-------------+
-    |Tag (1)|Length (2)|Data (Length)|
-    +-------+----------+-------------+
+    +-------+----------+-----------------+
+    |Tag (1)|Length (2)|Data (Length - 3)|
+    +-------+----------+-----------------+
+
+    Opcodes -> Tags
+    1. Handshake
+        1. No tag - whole payload is x25519 public key
+    2. Register
+        1. Handle
+        2. Password
+    3. Authenticate
+        1. Handle
+        2. Password
 
 ### Implementation Plan
 
