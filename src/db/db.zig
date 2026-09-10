@@ -93,8 +93,6 @@ pub const Database = struct {
         if (c.sqlite3_bind_blob(stmt, 2, pwd_hash.ptr, @intCast(pwd_hash.len), null) != c.SQLITE_OK) return error.BindError;
 
         // TODO: refactor this ugly switch
-        // TODO: add error for SQLITE_CONSTRAINT error when duplicate usernames & other bad
-        //          inserts happen
         switch (c.sqlite3_step(stmt)) {
             c.SQLITE_DONE => return,
             c.SQLITE_BUSY => return error.Busy,
@@ -127,8 +125,8 @@ pub const Database = struct {
         const str_len: usize = @intCast(c.sqlite3_column_bytes(stmt, 1));
         const str: []const u8 = str_ptr[0..str_len];
 
-        const blob_ptr = c.sqlite3_column_blob(stmt, 1);
-        const blob_len: usize = @intCast(c.sqlite3_column_bytes(stmt, 1));
+        const blob_ptr = c.sqlite3_column_blob(stmt, 2);
+        const blob_len: usize = @intCast(c.sqlite3_column_bytes(stmt, 2));
 
         if (blob_ptr) |valid_ptr| {
             const typed_ptr: [*]const u8 = @ptrCast(valid_ptr);
@@ -171,8 +169,8 @@ pub const Database = struct {
         const str_len: usize = @intCast(c.sqlite3_column_bytes(stmt, 1));
         const str: []const u8 = str_ptr[0..str_len];
 
-        const blob_ptr = c.sqlite3_column_blob(stmt, 1);
-        const blob_len: usize = @intCast(c.sqlite3_column_bytes(stmt, 1));
+        const blob_ptr = c.sqlite3_column_blob(stmt, 2);
+        const blob_len: usize = @intCast(c.sqlite3_column_bytes(stmt, 2));
 
         if (blob_ptr) |valid_ptr| {
             const typed_ptr: [*]const u8 = @ptrCast(valid_ptr);
