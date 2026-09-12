@@ -3,19 +3,22 @@ const std = @import("std");
 // NOTE: HEADER: |Magic Byte (1)|Version (1)|Opcode (1)|Message Len (3)| - Message length includes header bytes
 //       Message: |Nonce (12)|Tag (16)|Msg... |
 
+// TODO: do length verification via length in header, then subsequent points of reference do bounds checking
+
 pub const Opcodes = enum(u8) {
     Handshake = 0x01,
     Register,
     Authenticate,
-    ErrorMessage,
+    Response,
 
     pub inline fn check(num: u8, code: Opcodes) bool {
         return num == @intFromEnum(code);
     }
 };
 
-pub const Errcodes = enum(u8) {
-    BadMessage = 0x01,
+pub const ResponseCodes = enum(u8) {
+    Success = 0x01,
+    BadMessage,
     NotSecure,
     NotAuthenticated,
     InvalidCredentials,
@@ -116,34 +119,20 @@ pub const Authenticate = struct {
     }
 };
 
-pub const UnsecureError = struct {
+pub const Response = struct {
     header: Header,
-    err: u8,
+    code: u16,
 
-    pub fn parse(msg: []u8) !UnsecureError {
+    pub fn parse(msg: []u8) !Response {
         const header = try Header.parse(msg);
 
-        if (header.opcode != @intFromEnum(Opcodes.Register)) return error.BadFormat;
+        if (header.opcode != @intFromEnum(Opcodes.Responce)) return error.BadFormat;
+
+        const code = std.mem.readInt(u16, msg[9..11], .big);
 
         return .{
             .header = header,
-            .err = msg[msg.len - 1],
-        };
-    }
-};
-
-pub const SecureError = struct {
-    header: Header,
-    err: u8,
-
-    pub fn parse(msg: []u8) !SecureError {
-        const header = try Header.parse(msg);
-
-        if (header.opcode != @intFromEnum(Opcodes.Register)) return error.BadFormat;
-
-        return .{
-            .header = header,
-            .err = msg[msg.len - 1],
+            .code = code,
         };
     }
 };

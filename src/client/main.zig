@@ -33,8 +33,11 @@ fn encrypt(allocator: Allocator, unencrypted_msg: []const u8, nonce: *u96, key: 
 
     Chacha20.encrypt(encrypted_msg[28..], &tag, unencrypted_msg, &[_]u8{}, nonce_buf, key.*);
 
+    const tag_num = std.mem.readInt(u128, &tag, .native);
+    std.mem.writeInt(u128, &tag, tag_num, .big);
+
     @memcpy(encrypted_msg[0..12], nonce_buf[0..]);
-    @memcpy(encrypted_msg[12..28], tag[0..]); // TODO: this is probably native btye order, but might not matter if the other side assumes big byte order
+    @memcpy(encrypted_msg[12..28], tag[0..]);
 
     nonce.* += 1;
     return encrypted_msg;

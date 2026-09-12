@@ -9,6 +9,7 @@ const KQUEUE_SIZE = 128;
 //          if layer above isn't able to do what it needs todo
 // TODO: remove Opcode from header
 // BUG: udata in Client does not get free on close
+// TODO: figure out way to tell layer above that server is closing connection
 
 const Connection = struct {
     next: ?*Connection,

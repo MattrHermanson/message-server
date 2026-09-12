@@ -44,6 +44,8 @@
     3. Authenticate
         1. Handle
         2. Password
+    4. Responce
+        1. Resp Code
 
 ### Implementation Plan
 
