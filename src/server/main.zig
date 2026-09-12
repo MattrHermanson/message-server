@@ -21,9 +21,9 @@ fn validate_port(port_str: []const u8) !u16 {
     return port;
 }
 
-// TODO: implement response message for client actions
 // TODO: rewrite securityHandler to handoff tasks to threadpool
 // TODO: check that encrypted and decrypted msgs are getting freed
+// TODO: get id from Authenticate and Register, need to rewrite addUser() to return id
 
 pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
@@ -92,6 +92,8 @@ pub fn main(init: std.process.Init) !u8 {
     return 0;
 }
 
+// Server Control Functions
+
 /// setup client state and send server's pub key
 fn setup(udata: ?*anyopaque, s_client: *server.Client) server.HandlerFnError!void {
     s_client.udata = ALLOCATOR.create(Client) catch return error.Unrecoverable;
@@ -123,8 +125,6 @@ fn handle(udata: ?*anyopaque, s_client: *server.Client, msg: []u8) server.Handle
             const client: *Client = @ptrCast(@alignCast(raw_client_ptr));
             const state: *ServerState = @ptrCast(@alignCast(raw_state_ptr));
 
-            std.debug.print("received message\n", .{});
-
             // DON'T CONTINUE if secure connection & authentication not established
             const decrypted_msg = securityHandler(s_client, client, state, msg) catch |err| {
                 switch (err) {
@@ -144,6 +144,7 @@ fn handle(udata: ?*anyopaque, s_client: *server.Client, msg: []u8) server.Handle
 //fn onComplete(udata: ?*anyopaque, client: *server.Client) server.HandlerFnError!bool {}
 
 // Message-Server Logic
+
 const ServerState = struct {
     keys: X25519.KeyPair,
     salt: []u8,
@@ -173,7 +174,7 @@ fn securityHandler(s_client: *server.Client, client: *Client, state: *ServerStat
             // check opcode
             if (parser.Opcodes.check(msg[2], .Handshake)) {
                 const handshake = parser.Handshake.parse(msg) catch {
-                    sendUnsecureResp(s_client, parser.ResponseCodes.BadMessage) catch {
+                    sendUnsecureResp(state.io, s_client, parser.ResponseCodes.BadMessage) catch {
                         return error.Unrecoverable;
                     };
                     return error.NotAuthenticated;
@@ -196,7 +197,7 @@ fn securityHandler(s_client: *server.Client, client: *Client, state: *ServerStat
                 client.status = .Established;
                 return error.NotAuthenticated;
             } else {
-                sendUnsecureResp(s_client, parser.ResponseCodes.NotSecure) catch {
+                sendUnsecureResp(state.io, s_client, parser.ResponseCodes.NotSecure) catch {
                     return error.Unrecoverable;
                 };
 
@@ -208,6 +209,7 @@ fn securityHandler(s_client: *server.Client, client: *Client, state: *ServerStat
                 .Register => {
                     const decrypted_msg = decrypt(ALLOCATOR, client, msg) catch {
                         sendSecureResp(
+                            state.io,
                             ALLOCATOR,
                             s_client,
                             client,
@@ -220,6 +222,7 @@ fn securityHandler(s_client: *server.Client, client: *Client, state: *ServerStat
 
                     const register = parser.Register.parse(decrypted_msg) catch {
                         sendSecureResp(
+                            state.io,
                             ALLOCATOR,
                             s_client,
                             client,
@@ -254,7 +257,7 @@ fn securityHandler(s_client: *server.Client, client: *Client, state: *ServerStat
 
                     state.db.addUser(register.handle, hash) catch |err| {
                         if (err == error.StepError) {
-                            sendUnsecureResp(s_client, parser.ResponseCodes.InvalidCredentials) catch {
+                            sendUnsecureResp(state.io, s_client, parser.ResponseCodes.InvalidCredentials) catch {
                                 return error.Unrecoverable;
                             };
                         }
@@ -263,12 +266,25 @@ fn securityHandler(s_client: *server.Client, client: *Client, state: *ServerStat
                     };
 
                     client.status = .Authenticated;
-                    // TODO: send SUCCESS response
+
+                    // respond with success
+                    sendSecureResp(
+                        state.io,
+                        ALLOCATOR,
+                        s_client,
+                        client,
+                        state.nonce,
+                        parser.ResponseCodes.Success,
+                    ) catch {
+                        return error.Unrecoverable;
+                    };
+
                     return decrypted_msg;
                 },
                 .Authenticate => {
                     const decrypted_msg = decrypt(ALLOCATOR, client, msg) catch {
                         sendSecureResp(
+                            state.io,
                             ALLOCATOR,
                             s_client,
                             client,
@@ -281,6 +297,7 @@ fn securityHandler(s_client: *server.Client, client: *Client, state: *ServerStat
 
                     const authenticate = parser.Authenticate.parse(decrypted_msg) catch {
                         sendSecureResp(
+                            state.io,
                             ALLOCATOR,
                             s_client,
                             client,
@@ -293,6 +310,7 @@ fn securityHandler(s_client: *server.Client, client: *Client, state: *ServerStat
 
                     const user = state.db.getUser(authenticate.handle) catch {
                         sendSecureResp(
+                            state.io,
                             ALLOCATOR,
                             s_client,
                             client,
@@ -312,6 +330,7 @@ fn securityHandler(s_client: *server.Client, client: *Client, state: *ServerStat
                     ) catch |err| {
                         if (err == error.AuthenticationFailed) {
                             sendSecureResp(
+                                state.io,
                                 ALLOCATOR,
                                 s_client,
                                 client,
@@ -327,11 +346,24 @@ fn securityHandler(s_client: *server.Client, client: *Client, state: *ServerStat
                     };
 
                     client.status = .Authenticated; // TODO: maybe attach user from db to client
-                    // TODO: send SUCCESS response
+
+                    // respond with success
+                    sendSecureResp(
+                        state.io,
+                        ALLOCATOR,
+                        s_client,
+                        client,
+                        state.nonce,
+                        parser.ResponseCodes.Success,
+                    ) catch {
+                        return error.Unrecoverable;
+                    };
+
                     return decrypted_msg;
                 },
                 else => {
                     sendSecureResp(
+                        state.io,
                         ALLOCATOR,
                         s_client,
                         client,
@@ -346,6 +378,7 @@ fn securityHandler(s_client: *server.Client, client: *Client, state: *ServerStat
         .Authenticated => {
             const decrypted_msg = decrypt(ALLOCATOR, client, msg) catch {
                 sendSecureResp(
+                    state.io,
                     ALLOCATOR,
                     s_client,
                     client,
@@ -366,6 +399,8 @@ fn securityHandler(s_client: *server.Client, client: *Client, state: *ServerStat
 /// returns a message that is encrypted with nonce & tag prepended, header not included
 /// caller is responsible for freeing msg returned
 fn encrypt(allocator: Allocator, unencrypted_msg: []const u8, nonce: *u96, key: *[32]u8) ![]u8 {
+
+    // convert nonce to native endian
     var nonce_buf: [12]u8 = undefined;
     std.mem.writeInt(u96, &nonce_buf, nonce.*, .big);
 
@@ -374,8 +409,7 @@ fn encrypt(allocator: Allocator, unencrypted_msg: []const u8, nonce: *u96, key: 
 
     Chacha20.encrypt(encrypted_msg[28..], &tag, unencrypted_msg, &[_]u8{}, nonce_buf, key.*);
 
-    // const tag_num = std.mem.readInt(u128, &tag, .native);
-    // std.mem.writeInt(u128, &tag, tag_num, .big);
+    // convert tag to native endian
     const ptr: *u128 = @ptrCast(@alignCast(&tag));
     ptr.* = std.mem.nativeToBig(u128, ptr.*);
 
@@ -394,9 +428,11 @@ fn decrypt(allocator: Allocator, client: *Client, encrypted_msg: []u8) ![]u8 {
     var nonce: [12]u8 = encrypted_msg[6..18].*;
     var tag: [16]u8 = encrypted_msg[18..34].*;
 
+    // convert nonce to native endian
     const ptr: *u96 = @ptrCast(@alignCast(&nonce));
     ptr.* = std.mem.bigToNative(u96, ptr.*);
 
+    // convert tag to native endian
     const ptr2: *u128 = @ptrCast(@alignCast(&tag));
     ptr2.* = std.mem.bigToNative(u128, ptr2.*);
 
@@ -407,25 +443,30 @@ fn decrypt(allocator: Allocator, client: *Client, encrypted_msg: []u8) ![]u8 {
 }
 
 // Helpers to send error messages
-fn sendUnsecureResp(s_client: *server.Client, err: parser.ResponseCodes) !void {
-    const err_num: u16 = @intFromEnum(err);
-    var err_buf: [2]u8 = undefined;
+fn sendUnsecureResp(io: std.Io, s_client: *server.Client, code: parser.ResponseCodes) !void {
+    const code_num: u16 = @intFromEnum(code);
+    var code_buf: [2]u8 = undefined;
 
-    std.mem.writeInt(u16, &err_buf, err_num, .big);
+    std.mem.writeInt(u16, &code_buf, code_num, .big);
 
-    const msg = [_]u8{ 0x01, 0x00, 0x05 } ++ err_buf;
+    const msg = [_]u8{ 0x01, 0x00, 0x05 } ++ code_buf;
+
+    s_client.writerMutex.lockUncancelable(io);
     try s_client.write(@intFromEnum(parser.Opcodes.Response), msg[0..]);
+    s_client.writerMutex.unlock(io);
 }
 
-fn sendSecureResp(allocator: Allocator, s_client: *server.Client, client: *Client, nonce: *u96, err: parser.ResponseCodes) !void {
-    const err_num: u16 = @intFromEnum(err);
-    var err_buf: [2]u8 = undefined;
+fn sendSecureResp(io: std.Io, allocator: Allocator, s_client: *server.Client, client: *Client, nonce: *u96, code: parser.ResponseCodes) !void {
+    const code_num: u16 = @intFromEnum(code);
+    var code_buf: [2]u8 = undefined;
 
-    std.mem.writeInt(u16, &err_buf, err_num, .big);
+    std.mem.writeInt(u16, &code_buf, code_num, .big);
 
-    const err_msg = [_]u8{ 0x01, 0x00, 0x05 } ++ err_buf;
+    const err_msg = [_]u8{ 0x01, 0x00, 0x05 } ++ code_buf;
 
     const msg = try encrypt(allocator, err_msg[0..], nonce, client.key[0..32]);
 
+    s_client.writerMutex.lockUncancelable(io);
     try s_client.write(@intFromEnum(parser.Opcodes.Response), msg);
+    s_client.writerMutex.unlock(io);
 }
