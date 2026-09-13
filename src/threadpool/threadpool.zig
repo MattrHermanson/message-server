@@ -18,6 +18,7 @@ pub const Threadpool = struct {
     workers: []Thread,
     inbox: ?*Task,
     inbox_tail: ?*Task,
+    mx: std.Io.Mutex,
     full: Semaphore,
     running: std.atomic.Value(bool),
 
@@ -30,6 +31,7 @@ pub const Threadpool = struct {
             .workers = try allocator.alloc(Thread, num_threads),
             .inbox = null,
             .inbox_tail = null,
+            .mx = .init,
             .full = .{ .permits = 0 },
             .running = std.atomic.Value(bool).init(true),
         };
@@ -70,6 +72,7 @@ pub const Threadpool = struct {
         while (self.running.load(.acquire)) {
             self.full.waitUncancelable(self.io);
 
+            self.mx.lockUncancelable(self.io);
             if (self.inbox) |task| {
                 defer self.allocator.destroy(task);
                 self.inbox = task.next; // remove task from inbox first so no workers do the same thing
@@ -77,6 +80,7 @@ pub const Threadpool = struct {
 
                 task.func(task.data);
             }
+            self.mx.unlock(self.io);
         }
     }
 
@@ -89,6 +93,7 @@ pub const Threadpool = struct {
             .next = null,
         };
 
+        self.mx.lockUncancelable(self.io);
         if (self.inbox == null) {
             self.inbox = new_task;
             self.inbox_tail = new_task;
@@ -98,6 +103,7 @@ pub const Threadpool = struct {
                 self.inbox_tail = new_task;
             }
         }
+        self.mx.unlock(self.io);
 
         self.full.post(self.io);
     }

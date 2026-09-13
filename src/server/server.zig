@@ -6,10 +6,8 @@ const Mutex = std.Io.Mutex;
 const BACKLOG_MAX = 128;
 const KQUEUE_SIZE = 128;
 
-// TODO: Client needs a writer mutex
 // TODO: let setup return an error, so server can close conn
 //          if layer above isn't able to do what it needs todo
-// TODO: remove Opcode from header
 // BUG: udata in Client does not get free on close
 // TODO: figure out way to tell layer above that server is closing connection
 
@@ -200,7 +198,6 @@ pub const Server = struct {
                             const new_socket = try listener.*.accept(true); // TODO: loop until accept would block
                             const new_conn = try self.allocator.create(Connection);
                             const new_client = try Client.create(
-                                self.io,
                                 self.allocator,
                                 new_conn,
                                 new_socket,
@@ -359,7 +356,6 @@ pub const Server = struct {
 };
 
 pub const Client = struct {
-    io: std.Io,
     allocator: std.mem.Allocator,
 
     conn: *Connection,
@@ -368,31 +364,27 @@ pub const Client = struct {
 
     reader: Reader,
     writer: Writer,
-    writerMutex: Mutex,
 
     udata: ?*anyopaque, // will NOT be modified by any internal code
 
-    pub fn init(io: std.Io, allocator: std.mem.Allocator, conn: *Connection, socket: net.Socket, kq: *kqueue.Kqueue) !Client {
+    pub fn init(allocator: std.mem.Allocator, conn: *Connection, socket: net.Socket, kq: *kqueue.Kqueue) !Client {
         const reader = try Reader.init(allocator, socket.fd, 4096);
-        var mx: Mutex = .init;
-        const writer = Writer.init(io, allocator, socket.fd, &mx);
+        const writer = Writer.init(allocator, socket.fd);
 
         return .{
-            .io = io,
             .allocator = allocator,
             .conn = conn,
             .socket = socket,
             .kq = kq,
             .reader = reader,
             .writer = writer,
-            .writerMutex = mx,
             .udata = null,
         };
     }
 
-    pub fn create(io: std.Io, allocator: std.mem.Allocator, conn: *Connection, socket: net.Socket, kq: *kqueue.Kqueue) !*Client {
+    pub fn create(allocator: std.mem.Allocator, conn: *Connection, socket: net.Socket, kq: *kqueue.Kqueue) !*Client {
         const client = try allocator.create(Client);
-        client.* = try init(io, allocator, conn, socket, kq);
+        client.* = try init(allocator, conn, socket, kq);
         return client;
     }
 
@@ -678,22 +670,18 @@ const OutMsg = struct {
 };
 
 pub const Writer = struct {
-    io: std.Io,
     allocator: std.mem.Allocator,
     fd: u64,
-    mutex: *Mutex,
 
     // HACK: add max outgoing messages
 
     head_msg: ?*OutMsg,
     tail_msg: ?*OutMsg,
 
-    pub fn init(io: std.Io, allocator: std.mem.Allocator, fd: u64, mutex: *Mutex) Writer {
+    pub fn init(allocator: std.mem.Allocator, fd: u64) Writer {
         return .{
-            .io = io,
             .allocator = allocator,
             .fd = fd,
-            .mutex = mutex,
             .head_msg = null,
             .tail_msg = null,
         };
@@ -744,7 +732,6 @@ pub const Writer = struct {
 
     // writes (somtimes partially) messages to the socket, popping msgs
     pub fn flush(self: *Writer, kq: *kqueue.Kqueue, connection: *Connection) !void {
-        self.mutex.lockUncancelable(self.io);
         // TODO: use writev to write OutMsg queue
 
         // write until head is null or write would block
@@ -782,7 +769,5 @@ pub const Writer = struct {
 
         // register event with kq
         _ = try kq.kevent(&[_]kqueue.Kevent{event}, false, null);
-
-        self.mutex.unlock(self.io);
     }
 };

@@ -2,7 +2,6 @@ const std = @import("std");
 const net = @import("net");
 const Allocator = std.mem.Allocator;
 const server = @import("server.zig");
-const Threadpool = @import("threadpool").Threadpool;
 const db = @import("db");
 const parser = @import("parser.zig");
 
@@ -21,9 +20,9 @@ fn validate_port(port_str: []const u8) !u16 {
     return port;
 }
 
-// TODO: rewrite securityHandler to handoff tasks to threadpool
 // TODO: check that encrypted and decrypted msgs are getting freed
 // TODO: get id from Authenticate and Register, need to rewrite addUser() to return id
+// TODO: figure out how to clean up message server stuff when server closes connection
 
 pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
@@ -50,13 +49,6 @@ pub fn main(init: std.process.Init) !u8 {
         std.debug.print("Address Error, {}\n", .{err});
         return 1;
     };
-
-    // var thrd_pool = try Threadpool.create(
-    //     io,
-    //     std.heap.c_allocator,
-    //     try std.Thread.getCpuCount(),
-    // );
-    // thrd_pool.destroy();
 
     // TODO: pick better salt
     const keys = X25519.KeyPair.generate(io);
@@ -174,7 +166,7 @@ fn securityHandler(s_client: *server.Client, client: *Client, state: *ServerStat
             // check opcode
             if (parser.Opcodes.check(msg[2], .Handshake)) {
                 const handshake = parser.Handshake.parse(msg) catch {
-                    sendUnsecureResp(state.io, s_client, parser.ResponseCodes.BadMessage) catch {
+                    sendUnsecureResp(s_client, parser.ResponseCodes.BadMessage) catch {
                         return error.Unrecoverable;
                     };
                     return error.NotAuthenticated;
@@ -197,7 +189,7 @@ fn securityHandler(s_client: *server.Client, client: *Client, state: *ServerStat
                 client.status = .Established;
                 return error.NotAuthenticated;
             } else {
-                sendUnsecureResp(state.io, s_client, parser.ResponseCodes.NotSecure) catch {
+                sendUnsecureResp(s_client, parser.ResponseCodes.NotSecure) catch {
                     return error.Unrecoverable;
                 };
 
@@ -209,7 +201,6 @@ fn securityHandler(s_client: *server.Client, client: *Client, state: *ServerStat
                 .Register => {
                     const decrypted_msg = decrypt(ALLOCATOR, client, msg) catch {
                         sendSecureResp(
-                            state.io,
                             ALLOCATOR,
                             s_client,
                             client,
@@ -222,7 +213,6 @@ fn securityHandler(s_client: *server.Client, client: *Client, state: *ServerStat
 
                     const register = parser.Register.parse(decrypted_msg) catch {
                         sendSecureResp(
-                            state.io,
                             ALLOCATOR,
                             s_client,
                             client,
@@ -257,7 +247,7 @@ fn securityHandler(s_client: *server.Client, client: *Client, state: *ServerStat
 
                     state.db.addUser(register.handle, hash) catch |err| {
                         if (err == error.StepError) {
-                            sendUnsecureResp(state.io, s_client, parser.ResponseCodes.InvalidCredentials) catch {
+                            sendUnsecureResp(s_client, parser.ResponseCodes.InvalidCredentials) catch {
                                 return error.Unrecoverable;
                             };
                         }
@@ -269,7 +259,6 @@ fn securityHandler(s_client: *server.Client, client: *Client, state: *ServerStat
 
                     // respond with success
                     sendSecureResp(
-                        state.io,
                         ALLOCATOR,
                         s_client,
                         client,
@@ -284,7 +273,6 @@ fn securityHandler(s_client: *server.Client, client: *Client, state: *ServerStat
                 .Authenticate => {
                     const decrypted_msg = decrypt(ALLOCATOR, client, msg) catch {
                         sendSecureResp(
-                            state.io,
                             ALLOCATOR,
                             s_client,
                             client,
@@ -297,7 +285,6 @@ fn securityHandler(s_client: *server.Client, client: *Client, state: *ServerStat
 
                     const authenticate = parser.Authenticate.parse(decrypted_msg) catch {
                         sendSecureResp(
-                            state.io,
                             ALLOCATOR,
                             s_client,
                             client,
@@ -310,7 +297,6 @@ fn securityHandler(s_client: *server.Client, client: *Client, state: *ServerStat
 
                     const user = state.db.getUser(authenticate.handle) catch {
                         sendSecureResp(
-                            state.io,
                             ALLOCATOR,
                             s_client,
                             client,
@@ -330,7 +316,6 @@ fn securityHandler(s_client: *server.Client, client: *Client, state: *ServerStat
                     ) catch |err| {
                         if (err == error.AuthenticationFailed) {
                             sendSecureResp(
-                                state.io,
                                 ALLOCATOR,
                                 s_client,
                                 client,
@@ -349,7 +334,6 @@ fn securityHandler(s_client: *server.Client, client: *Client, state: *ServerStat
 
                     // respond with success
                     sendSecureResp(
-                        state.io,
                         ALLOCATOR,
                         s_client,
                         client,
@@ -363,7 +347,6 @@ fn securityHandler(s_client: *server.Client, client: *Client, state: *ServerStat
                 },
                 else => {
                     sendSecureResp(
-                        state.io,
                         ALLOCATOR,
                         s_client,
                         client,
@@ -378,7 +361,6 @@ fn securityHandler(s_client: *server.Client, client: *Client, state: *ServerStat
         .Authenticated => {
             const decrypted_msg = decrypt(ALLOCATOR, client, msg) catch {
                 sendSecureResp(
-                    state.io,
                     ALLOCATOR,
                     s_client,
                     client,
@@ -443,7 +425,7 @@ fn decrypt(allocator: Allocator, client: *Client, encrypted_msg: []u8) ![]u8 {
 }
 
 // Helpers to send error messages
-fn sendUnsecureResp(io: std.Io, s_client: *server.Client, code: parser.ResponseCodes) !void {
+fn sendUnsecureResp(s_client: *server.Client, code: parser.ResponseCodes) !void {
     const code_num: u16 = @intFromEnum(code);
     var code_buf: [2]u8 = undefined;
 
@@ -451,12 +433,10 @@ fn sendUnsecureResp(io: std.Io, s_client: *server.Client, code: parser.ResponseC
 
     const msg = [_]u8{ 0x01, 0x00, 0x05 } ++ code_buf;
 
-    s_client.writerMutex.lockUncancelable(io);
     try s_client.write(@intFromEnum(parser.Opcodes.Response), msg[0..]);
-    s_client.writerMutex.unlock(io);
 }
 
-fn sendSecureResp(io: std.Io, allocator: Allocator, s_client: *server.Client, client: *Client, nonce: *u96, code: parser.ResponseCodes) !void {
+fn sendSecureResp(allocator: Allocator, s_client: *server.Client, client: *Client, nonce: *u96, code: parser.ResponseCodes) !void {
     const code_num: u16 = @intFromEnum(code);
     var code_buf: [2]u8 = undefined;
 
@@ -466,7 +446,5 @@ fn sendSecureResp(io: std.Io, allocator: Allocator, s_client: *server.Client, cl
 
     const msg = try encrypt(allocator, err_msg[0..], nonce, client.key[0..32]);
 
-    s_client.writerMutex.lockUncancelable(io);
     try s_client.write(@intFromEnum(parser.Opcodes.Response), msg);
-    s_client.writerMutex.unlock(io);
 }

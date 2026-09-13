@@ -185,6 +185,13 @@ fn startup(allocator: Allocator, nonce_counter: *u96, sock: net.Socket, address:
         const username: []const u8 = "testuser";
         const pwd_text: []const u8 = "testpwd";
         try authenticate(allocator, sock, username, pwd_text, nonce_counter, &session_key);
+
+        // Wait for the server's response before exiting
+        var resp_buf: [1024]u8 = undefined;
+        const bytes_read2 = try net.read(sock.fd, &resp_buf);
+        if (bytes_read2 > 0) {
+            std.debug.print("Received server response\n", .{});
+        }
         std.debug.print("authenticated\n", .{});
     }
 }

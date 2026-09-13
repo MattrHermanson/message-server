@@ -16,7 +16,6 @@
 * Read calls might return more or less than a single message, so you buffer
 * Stateful Message Aware Reader
 * Having Client and Server structs
-* thread pool
 * timeouts
 * decoupling Disk I/O
 
@@ -44,7 +43,7 @@
     3. Authenticate
         1. Handle
         2. Password
-    4. Responce
+    4. Response
         1. Resp Code
 
 ### Implementation Plan
@@ -59,20 +58,7 @@
     connection, set their socket to non-blocking mode, and register them with
     your event loop.  
 
-#### Phase 2: Thread Pool & Concurrency
-
-* Build the Worker Pool: Initialize a set of background worker threads and a
-    thread-safe task queue to handle all disk operations.
-* Configure Inter-thread Signaling: Register synthetic, user-triggered events
-    in your event loop. This gives your background threads a way to notify the
-    main network loop when they finish a blocking task.
-
-* Concurrency Plans
-    1. Per Client Message Queues
-    2. Worker Pinning (Thread Affinity)
-        * a client always gets handled by the same thread
-
-#### Phase 3: Custom Protocol & Parsing
+#### Phase 2: Custom Protocol & Parsing
 
 * Define the Header Parser: Write logic to read the fixed-size packet header,
     validate it to ensure the client is speaking your protocol, and extract the
@@ -81,7 +67,7 @@
     and parse the specific fields, ensuring you enforce a consistent byte order
     across different devices.  
 
-#### Phase 5: Connecting the Chat Logic
+#### Phase 3: Connecting the Chat Logic
 
 * Implement the Send Flow: Update the main loop so that incoming messages are
     packaged into tasks and handed off to the thread pool, freeing the main loop
@@ -93,7 +79,7 @@
     routine that periodically checks for inactive sockets and aggressively
     disconnects users who have silently dropped offline.
 
-#### Phase 6: Advanced Features
+#### Phase 4: Advanced Features
 
 * Implement History Fetching: Add logic to process scroll-back requests by
     querying your index, dispatching a read task to the thread pool, and

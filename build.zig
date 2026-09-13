@@ -83,7 +83,6 @@ pub fn build(b: *std.Build) void {
 
     server_exe.root_module.addImport("net", net_module);
     server_exe.root_module.addImport("kqueue", kqueue_module);
-    server_exe.root_module.addImport("threadpool", threadpool_module);
     server_exe.root_module.addImport("db", db_module);
 
     // Tell the build system to put the compiled binary in the `zig-out/bin` folder
