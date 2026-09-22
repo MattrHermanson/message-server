@@ -79,9 +79,9 @@ pub const Database = struct {
         }
     }
 
-    // idea: prepare this statement and then hold on to it and just reset
-    pub fn addUser(self: *Database, handle: []const u8, pwd_hash: []const u8) !void {
-        const sql: [:0]const u8 = "INSERT INTO User (handle, pwd_hash) VALUES (?, ?);";
+    /// Adds user, caller must free handle and blob returned
+    pub fn addUser(self: *Database, allocator: Allocator, handle: []const u8, pwd_hash: []const u8) !User {
+        const sql: [:0]const u8 = "INSERT INTO User (handle, pwd_hash) VALUES (?, ?) RETURNING *;";
 
         var stmt: *c.sqlite3_stmt = undefined;
         const rc = c.sqlite3_prepare_v2(self.connection, sql.ptr, @intCast(sql.len), @ptrCast(&stmt), null);
@@ -89,18 +89,35 @@ pub const Database = struct {
         defer _ = c.sqlite3_finalize(stmt);
 
         if (c.sqlite3_bind_text(stmt, 1, handle.ptr, @intCast(handle.len), null) != c.SQLITE_OK) return error.BindError;
-
         if (c.sqlite3_bind_blob(stmt, 2, pwd_hash.ptr, @intCast(pwd_hash.len), null) != c.SQLITE_OK) return error.BindError;
 
-        // TODO: refactor this ugly switch
-        switch (c.sqlite3_step(stmt)) {
-            c.SQLITE_DONE => return,
-            c.SQLITE_BUSY => return error.Busy,
-            c.SQLITE_ROW => return error.Row, // maybe shouldn't be an error, but shouldn't return a row
-            c.SQLITE_ERROR, c.SQLITE_INTERRUPT, c.SQLITE_SCHEMA, c.SQLITE_CORRUPT => return error.StepError,
-            c.SQLITE_MISUSE => return error.Misuse,
-            else => return error.StepError,
+        const result = c.sqlite3_step(stmt);
+        if (result != c.SQLITE_ROW) return error.StepError;
+
+        const id = c.sqlite3_column_int64(stmt, 0);
+
+        const str_ptr = c.sqlite3_column_text(stmt, 1);
+        const str_len: usize = @intCast(c.sqlite3_column_bytes(stmt, 1));
+        const str: []const u8 = str_ptr[0..str_len];
+
+        const blob_ptr = c.sqlite3_column_blob(stmt, 2);
+        const blob_len: usize = @intCast(c.sqlite3_column_bytes(stmt, 2));
+
+        if (blob_ptr) |valid_ptr| {
+            const typed_ptr: [*]const u8 = @ptrCast(valid_ptr);
+            const blob: []const u8 = typed_ptr[0..blob_len];
+
+            const new_str = try allocator.dupe(u8, str);
+            const new_blob = try allocator.dupe(u8, blob);
+
+            return User{
+                .id = @intCast(id),
+                .handle = new_str,
+                .pwd_hash = new_blob,
+            };
         }
+
+        return error.ColumnError;
     }
 
     /// Gets user, caller must free handle and blob returned

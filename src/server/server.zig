@@ -6,9 +6,6 @@ const Mutex = std.Io.Mutex;
 const BACKLOG_MAX = 128;
 const KQUEUE_SIZE = 128;
 
-// TODO: let setup return an error, so server can close conn
-//          if layer above isn't able to do what it needs todo
-
 const Connection = struct {
     next: ?*Connection,
     prev: ?*Connection,

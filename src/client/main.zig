@@ -182,9 +182,15 @@ fn startup(allocator: Allocator, nonce_counter: *u96, sock: net.Socket, address:
         );
         std.debug.print("computed shared secret\n", .{});
 
-        const username: []const u8 = "testuser";
+        // TEST USERS LOGIN INFO
+        // const username: []const u8 = "testuser";
+        // const pwd_text: []const u8 = "testpwd";
+
+        const username: []const u8 = "testuser2";
         const pwd_text: []const u8 = "testpwd";
+
         try authenticate(allocator, sock, username, pwd_text, nonce_counter, &session_key);
+        //try register(allocator, sock, username, pwd_text, nonce_counter, &session_key);
 
         // Wait for the server's response before exiting
         var resp_buf: [1024]u8 = undefined;

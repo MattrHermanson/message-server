@@ -20,14 +20,6 @@ fn validate_port(port_str: []const u8) !u16 {
     return port;
 }
 
-// TODO: check for memory leaks
-
-// TODO: check that encrypted and decrypted msgs are getting freed
-// TODO: get id from Authenticate and Register, need to rewrite addUser() to return id
-
-// TODO: figure out how to clean up message server stuff when server closes connection
-// idea - change onComplete to onClose and use user signals to call a clean up function?
-
 // TODO: Implement opcodes in docs 5-9
 
 pub fn main(init: std.process.Init) !u8 {
@@ -134,6 +126,8 @@ fn handle(udata: ?*anyopaque, s_client: *server.Client, msg: []u8) server.Handle
             std.debug.print("Encrypted msg: {s}\n", .{msg});
             std.debug.print("Decrypted msg: {s}\n", .{decrypted_msg});
 
+            std.debug.print("\nID: {d} HANDLE: {s}\n", .{ client.id, client.handle });
+
             s_client.allocator.free(decrypted_msg);
             s_client.allocator.free(msg);
 
@@ -148,6 +142,7 @@ fn onClose(udata: ?*anyopaque, s_client: *server.Client) void {
     if (s_client.udata) |raw_client_ptr| {
         const client: *Client = @ptrCast(@alignCast(raw_client_ptr));
 
+        client.deinit(s_client.allocator);
         s_client.allocator.destroy(client);
     }
 }
@@ -171,6 +166,13 @@ const Status = enum {
 const Client = struct {
     status: Status,
     key: []u8,
+    id: u64,
+    handle: []const u8,
+
+    pub fn deinit(self: *Client, allocator: Allocator) void {
+        allocator.free(self.key);
+        allocator.free(self.handle);
+    }
 };
 
 /// carries out security protocols for all client statuses
@@ -260,7 +262,7 @@ fn securityHandler(s_client: *server.Client, client: *Client, state: *ServerStat
                         state.io,
                     ) catch return error.Unrecoverable;
 
-                    state.db.addUser(register.handle, hash) catch |err| {
+                    const user = state.db.addUser(s_client.allocator, register.handle, hash) catch |err| {
                         if (err == error.StepError) {
                             sendUnsecureResp(s_client, parser.ResponseCodes.InvalidCredentials) catch {
                                 return error.Unrecoverable;
@@ -271,6 +273,8 @@ fn securityHandler(s_client: *server.Client, client: *Client, state: *ServerStat
                     };
 
                     client.status = .Authenticated;
+                    client.id = user.id;
+                    client.handle = user.handle;
 
                     // respond with success
                     sendSecureResp(
@@ -281,6 +285,8 @@ fn securityHandler(s_client: *server.Client, client: *Client, state: *ServerStat
                     ) catch {
                         return error.Unrecoverable;
                     };
+
+                    s_client.allocator.free(user.pwd_hash);
 
                     return decrypted_msg;
                 },
@@ -340,7 +346,9 @@ fn securityHandler(s_client: *server.Client, client: *Client, state: *ServerStat
                         }
                     };
 
-                    client.status = .Authenticated; // TODO: maybe attach user from db to client
+                    client.status = .Authenticated;
+                    client.id = user.id;
+                    client.handle = user.handle;
 
                     // respond with success
                     sendSecureResp(
@@ -353,7 +361,6 @@ fn securityHandler(s_client: *server.Client, client: *Client, state: *ServerStat
                     };
 
                     // free allocated fields in user
-                    s_client.allocator.free(user.handle);
                     s_client.allocator.free(user.pwd_hash);
 
                     return decrypted_msg;
