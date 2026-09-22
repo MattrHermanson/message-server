@@ -9,7 +9,7 @@ pub const User = struct {
 };
 
 pub const Database = struct {
-    allocator: Allocator,
+    allocator: Allocator, // might not need to store allocator
     connection: *c.sqlite3,
 
     /// Opens a database connection and runs setup SQL
@@ -104,7 +104,7 @@ pub const Database = struct {
     }
 
     /// Gets user, caller must free handle and blob returned
-    pub fn getUser(self: *Database, handle: []const u8) !User {
+    pub fn getUser(self: *Database, allocator: Allocator, handle: []const u8) !User {
         const sql: [:0]const u8 = "SELECT * FROM User WHERE handle = ?;";
 
         // prepare statement
@@ -132,8 +132,8 @@ pub const Database = struct {
             const typed_ptr: [*]const u8 = @ptrCast(valid_ptr);
             const blob: []const u8 = typed_ptr[0..blob_len];
 
-            const new_str = try self.allocator.dupe(u8, str);
-            const new_blob = try self.allocator.dupe(u8, blob);
+            const new_str = try allocator.dupe(u8, str);
+            const new_blob = try allocator.dupe(u8, blob);
 
             const user: User = .{
                 .id = @intCast(id),
@@ -148,7 +148,7 @@ pub const Database = struct {
 
     /// Checks password hash of a handle. Returns User if true.
     /// Caller is responsible for User's memory
-    pub fn compareHash(self: *Database, handle: []const u8, hash: []const u8) !?User {
+    pub fn compareHash(self: *Database, allocator: Allocator, handle: []const u8, hash: []const u8) !?User {
         const sql: [:0]const u8 = "SELECT * FROM User WHERE handle = ?;";
 
         // prepare statement
@@ -179,8 +179,8 @@ pub const Database = struct {
             // return user if hashes match
             if (!std.mem.eql(u8, hash, blob)) return null;
 
-            const new_str = try self.allocator.dupe(u8, str);
-            const new_blob = try self.allocator.dupe(u8, blob);
+            const new_str = try allocator.dupe(u8, str);
+            const new_blob = try allocator.dupe(u8, blob);
 
             const user: User = .{
                 .id = @intCast(id),

@@ -8,8 +8,6 @@ const KQUEUE_SIZE = 128;
 
 // TODO: let setup return an error, so server can close conn
 //          if layer above isn't able to do what it needs todo
-// BUG: udata in Client does not get free on close
-// TODO: figure out way to tell layer above that server is closing connection
 
 const Connection = struct {
     next: ?*Connection,
@@ -92,7 +90,7 @@ pub const Server = struct {
     tail_connection: ?*Connection,
     setup: ?*const fn (udata: ?*anyopaque, client: *Client) HandlerFnError!void,
     handle: *const fn (udata: ?*anyopaque, client: *Client, msg: []u8) HandlerFnError!bool,
-    onComplete: ?*const fn (udata: ?*anyopaque, client: *Client) HandlerFnError!bool,
+    onClose: ?*const fn (udata: ?*anyopaque, client: *Client) void,
     timeout: std.Io.Duration,
     udata: ?*anyopaque, // will NOT be modified by any internal code
 
@@ -101,7 +99,7 @@ pub const Server = struct {
         allocator: std.mem.Allocator,
         setup: ?*const fn (udata: ?*anyopaque, client: *Client) HandlerFnError!void,
         handle: *const fn (udata: ?*anyopaque, client: *Client, msg: []u8) HandlerFnError!bool,
-        onComplete: ?*const fn (udata: ?*anyopaque, client: *Client) HandlerFnError!bool,
+        onClose: ?*const fn (udata: ?*anyopaque, client: *Client) void,
         timeout: std.Io.Duration,
         udata: ?*anyopaque,
     ) !Server {
@@ -114,7 +112,7 @@ pub const Server = struct {
             .tail_connection = null,
             .setup = setup,
             .handle = handle,
-            .onComplete = onComplete,
+            .onClose = onClose,
             .timeout = timeout,
             .udata = udata,
         };
@@ -270,13 +268,6 @@ pub const Server = struct {
                                 }
                             }
 
-                            // User
-                            if (self.onComplete) |onComplete| {
-                                if (kqueue.checkFilter(ev, kqueue.Filter.User)) {
-                                    should_close = should_close or onComplete(self.udata, client) catch true;
-                                }
-                            }
-
                             // Write
                             if (kqueue.checkFilter(ev, kqueue.Filter.Write)) {
                                 client.flush() catch |err| {
@@ -286,9 +277,21 @@ pub const Server = struct {
                                 };
                             }
 
+                            // User
+                            if (kqueue.checkFilter(ev, kqueue.Filter.User)) {
+                                // run user cleanup
+                                if (self.onClose) |onClose| {
+                                    onClose(self.udata, client);
+                                }
+
+                                // run server cleanup
+                                self.closeConnection(conn);
+                                break;
+                            }
+
                             // Close connection
                             if (should_close) {
-                                self.closeConnection(conn);
+                                client.signal();
                             }
                         },
                     }
@@ -389,6 +392,18 @@ pub const Client = struct {
     }
 
     pub fn deinit(self: *Client) void {
+
+        // remove EVFILT_USER on deinit
+        const event = kqueue.Kevent{
+            .identifier = self.socket.fd,
+            .filter = @intFromEnum(kqueue.Filter.User),
+            .flags = @intFromEnum(kqueue.Flag.Delete),
+            .fflags = 0,
+            .data = 0,
+            .udata = @ptrCast(self.conn),
+        };
+        _ = self.kq.kevent(&[_]kqueue.Kevent{event}, false, null) catch {};
+
         self.reader.deinit();
         self.writer.deinit();
         self.socket.deinit();
@@ -396,13 +411,11 @@ pub const Client = struct {
 
     /// Dispatches a user signal for this client
     pub fn signal(self: Client) void {
-        // TODO: To actually trigger the event, you typically need to pass NOTE_TRIGGER (often 0x01)
-        // to fflags depending on your specific kqueue wrapper's implementation
         const event = kqueue.Kevent{
             .identifier = self.socket.fd,
             .filter = @intFromEnum(kqueue.Filter.User),
             .flags = @intFromEnum(kqueue.Flag.Add) | @intFromEnum(kqueue.Flag.Clear),
-            .fflags = 0,
+            .fflags = 0x01000000,
             .data = 0,
             .udata = @ptrCast(self.conn),
         };
@@ -720,7 +733,7 @@ pub const Writer = struct {
         const event = kqueue.Kevent{
             .identifier = connection.type.client.socket.fd,
             .filter = @intFromEnum(kqueue.Filter.Write),
-            .flags = @intFromEnum(kqueue.Flag.Add),
+            .flags = @intFromEnum(kqueue.Flag.Add) | @intFromEnum(kqueue.Flag.Enable),
             .fflags = 0,
             .data = 0,
             .udata = @ptrCast(connection),
@@ -757,17 +770,18 @@ pub const Writer = struct {
             }
         }
 
-        // if head is null remove write from kqueue
-        const event = kqueue.Kevent{
-            .identifier = connection.type.client.socket.fd,
-            .filter = @intFromEnum(kqueue.Filter.Write),
-            .flags = @intFromEnum(kqueue.Flag.Disable),
-            .fflags = 0,
-            .data = 0,
-            .udata = @ptrCast(connection),
-        };
+        if (self.head_msg == null) {
+            const event = kqueue.Kevent{
+                .identifier = connection.type.client.socket.fd,
+                .filter = @intFromEnum(kqueue.Filter.Write),
+                .flags = @intFromEnum(kqueue.Flag.Disable),
+                .fflags = 0,
+                .data = 0,
+                .udata = @ptrCast(connection),
+            };
 
-        // register event with kq
-        _ = try kq.kevent(&[_]kqueue.Kevent{event}, false, null);
+            // register event with kq
+            _ = try kq.kevent(&[_]kqueue.Kevent{event}, false, null);
+        }
     }
 };

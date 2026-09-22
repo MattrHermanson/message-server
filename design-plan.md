@@ -45,6 +45,23 @@
         2. Password
     4. Response
         1. Resp Code
+    5. SendMessage
+        1. From UID
+        2. To UID
+        3. Message
+    6. NewMessages - Shouldn't be send by client. Probably move to response code
+        1. NumMessages
+        Repeats NumMessages times
+            1. From UID
+            2. To UID
+            3. Message
+    7. GetLastMessages - Expects response
+        1. NumMessages
+    8. GetMessages - get messages fro n inclusive to m exclusive. Expects response
+        1. N
+        2. M
+    9. SearchHandle - Expects response
+        1. Handle
 
 ### Implementation Plan
 

@@ -192,6 +192,7 @@ fn startup(allocator: Allocator, nonce_counter: *u96, sock: net.Socket, address:
         if (bytes_read2 > 0) {
             std.debug.print("Received server response\n", .{});
         }
+
         std.debug.print("authenticated\n", .{});
     }
 }
