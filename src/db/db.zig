@@ -61,6 +61,12 @@ pub const Database = struct {
             }
         }
 
+        const rc2 = c.sqlite3_exec(db_ptr, "PRAGMA foreign_keys = ON;", null, null, null);
+        if (rc2 != c.SQLITE_OK) {
+            _ = c.sqlite3_close(db_ptr);
+            return error.ForeignKeyError;
+        }
+
         if (db_ptr) |raw_ptr| {
             db.connection = raw_ptr;
         } else {
