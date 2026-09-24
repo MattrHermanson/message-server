@@ -10,6 +10,11 @@ pub const Opcodes = enum(u8) {
     Register,
     Authenticate,
     Response,
+    SendMessage,
+    GetLastMessages,
+    GetMessages,
+    SearchHandle,
+    //isOnline - might be a good to allow for status dots
 
     pub inline fn check(num: u8, code: Opcodes) bool {
         return num == @intFromEnum(code);
@@ -20,7 +25,6 @@ pub const ResponseCodes = enum(u8) {
     Success = 0x01,
     BadMessage,
     NotSecure,
-    NotAuthenticated,
     InvalidCredentials,
 };
 

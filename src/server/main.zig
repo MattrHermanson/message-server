@@ -2,17 +2,51 @@ const std = @import("std");
 const net = @import("net");
 const Allocator = std.mem.Allocator;
 const server = @import("server.zig");
-const db = @import("db");
 const parser = @import("parser.zig");
+const db = @import("db");
+const app = @import("app.zig");
+const security = @import("security.zig");
 
 const X25519 = std.crypto.dh.X25519;
-const Chacha20 = std.crypto.aead.chacha_poly.ChaCha20Poly1305;
-const Sha512 = std.crypto.kdf.hkdf.HkdfSha256;
-const Argon2 = std.crypto.pwhash.argon2;
 
 const expect = std.testing.expect;
 
 const ALLOCATOR = std.heap.c_allocator;
+
+// TYPES
+pub const ServerState = struct {
+    io: std.Io,
+    appContext: AppContext,
+    SecurityContext: SecurityContext,
+};
+
+pub const AppContext = struct {
+    db: *db.Database,
+};
+
+pub const SecurityContext = struct {
+    keys: X25519.KeyPair,
+    salt: []u8,
+    nonce: *u96,
+};
+
+pub const Status = enum {
+    New,
+    Established,
+    Authenticated,
+};
+
+pub const Client = struct {
+    status: Status,
+    key: []u8,
+    id: u64,
+    handle: []const u8,
+
+    pub fn deinit(self: *Client, allocator: Allocator) void {
+        allocator.free(self.key);
+        allocator.free(self.handle);
+    }
+};
 
 fn validate_port(port_str: []const u8) !u16 {
     const port = try std.fmt.parseInt(u16, port_str, 10);
@@ -56,11 +90,15 @@ pub fn main(init: std.process.Init) !u8 {
     var database = try db.Database.init(io, ALLOCATOR, "./store.db", "./src/sql/setup.sql");
 
     var server_state: ServerState = .{
-        .keys = keys,
-        .salt = salt[0..],
-        .db = &database,
         .io = io,
-        .nonce = &nonce_counter,
+        .SecurityContext = .{
+            .keys = keys,
+            .nonce = &nonce_counter,
+            .salt = salt[0..],
+        },
+        .appContext = .{
+            .db = &database,
+        },
     };
 
     var sv = try server.Server.init(
@@ -86,6 +124,7 @@ pub fn main(init: std.process.Init) !u8 {
 
 /// setup client state and send server's pub key
 fn setup(udata: ?*anyopaque, s_client: *server.Client) server.HandlerFnError!void {
+    // TODO: refactor some of this into security
     s_client.udata = s_client.allocator.create(Client) catch return error.Unrecoverable;
 
     if (s_client.udata) |raw_ptr| {
@@ -96,7 +135,7 @@ fn setup(udata: ?*anyopaque, s_client: *server.Client) server.HandlerFnError!voi
             clnt.status = .New;
 
             // send server's pub key
-            s_client.write(0x1, &state.keys.public_key) catch {
+            s_client.write(0x1, &state.SecurityContext.keys.public_key) catch {
                 return error.Unrecoverable;
             };
         }
@@ -115,18 +154,80 @@ fn handle(udata: ?*anyopaque, s_client: *server.Client, msg: []u8) server.Handle
             const client: *Client = @ptrCast(@alignCast(raw_client_ptr));
             const state: *ServerState = @ptrCast(@alignCast(raw_state_ptr));
 
-            // DON'T CONTINUE if secure connection & authentication not established
-            const decrypted_msg = securityHandler(s_client, client, state, msg) catch |err| {
-                switch (err) {
-                    error.Unrecoverable => return error.Unrecoverable,
-                    error.NotAuthenticated => return false,
-                }
+            // process message through security
+            const decrypted_msg = security.processMessage(
+                s_client.allocator,
+                client,
+                state.SecurityContext,
+                msg,
+            ) catch |err| {
+                const res_code: parser.ResponseCodes = switch (err) {
+                    error.BadMessage => .BadMessage,
+                    error.Unrecoverable => return server.HandlerFnError.Unrecoverable,
+                    error.NotSecure => .NotSecure,
+                };
+
+                sendUnsecureResp(s_client, res_code) catch {
+                    return server.HandlerFnError.Unrecoverable;
+                };
+
+                return false;
             };
 
-            std.debug.print("Encrypted msg: {s}\n", .{msg});
-            std.debug.print("Decrypted msg: {s}\n", .{decrypted_msg});
+            // execute op
+            const result = app.routeOperation(
+                state.io,
+                s_client.allocator,
+                client,
+                state.appContext,
+                decrypted_msg,
+            ) catch |err| {
+                const res_code: parser.ResponseCodes = switch (err) {
+                    error.BadMessage, error.InvalidVersion => .BadMessage,
+                    error.InvalidStatus => .NotSecure,
+                    error.Unrecoverable => return server.HandlerFnError.Unrecoverable,
+                    error.InvalidCredentials => .InvalidCredentials,
+                };
 
-            std.debug.print("\nID: {d} HANDLE: {s}\n", .{ client.id, client.handle });
+                sendUnsecureResp(s_client, res_code) catch {
+                    return server.HandlerFnError.Unrecoverable;
+                };
+
+                return false;
+            };
+
+            // send response to client loaded or unloaded
+            switch (result) {
+                .response => |code| {
+                    // send simple response
+                    sendSecureResp(
+                        s_client,
+                        client,
+                        state.SecurityContext,
+                        code,
+                    ) catch return server.HandlerFnError.Unrecoverable;
+                },
+                .loaded_response => |data| {
+                    // send complex response
+                    const encrpyted_msg = security.encrypt(
+                        s_client.allocator,
+                        data.payload,
+                        state.SecurityContext,
+                        client.key[0..32],
+                    ) catch {
+                        return server.HandlerFnError.Unrecoverable;
+                    };
+
+                    s_client.write(@intFromEnum(data.response_code), encrpyted_msg) catch {
+                        return server.HandlerFnError.Unrecoverable;
+                    };
+
+                    s_client.allocator.free(data.payload);
+                    s_client.allocator.free(encrpyted_msg);
+                },
+            }
+
+            std.debug.print("Client id: {d}, handle: {s}\n", .{ client.id, client.handle });
 
             s_client.allocator.free(decrypted_msg);
             s_client.allocator.free(msg);
@@ -147,303 +248,8 @@ fn onClose(udata: ?*anyopaque, s_client: *server.Client) void {
     }
 }
 
-// Message-Server Logic
-
-const ServerState = struct {
-    keys: X25519.KeyPair,
-    salt: []u8,
-    db: *db.Database,
-    io: std.Io,
-    nonce: *u96,
-};
-
-const Status = enum {
-    New,
-    Established,
-    Authenticated,
-};
-
-const Client = struct {
-    status: Status,
-    key: []u8,
-    id: u64,
-    handle: []const u8,
-
-    pub fn deinit(self: *Client, allocator: Allocator) void {
-        allocator.free(self.key);
-        allocator.free(self.handle);
-    }
-};
-
-/// carries out security protocols for all client statuses
-/// returns the decrypted header+message
-/// returns NotAuthenticated when connection isn't encrypted or authenticated
-/// returns Unrecoverable if the connection must be closed
-fn securityHandler(s_client: *server.Client, client: *Client, state: *ServerState, msg: []u8) ![]u8 {
-    switch (client.status) {
-        .New => {
-            // check opcode
-            if (parser.Opcodes.check(msg[2], .Handshake)) {
-                const handshake = parser.Handshake.parse(msg) catch {
-                    sendUnsecureResp(s_client, parser.ResponseCodes.BadMessage) catch {
-                        return error.Unrecoverable;
-                    };
-                    return error.NotAuthenticated;
-                };
-
-                // convert to 32 byte array
-                var client_pub_key: [32]u8 = undefined;
-                @memcpy(&client_pub_key, handshake.pub_key);
-
-                // compute shared secret
-                const shared_secret = X25519.scalarmult(state.keys.secret_key, client_pub_key) catch {
-                    return error.Unrecoverable;
-                };
-
-                // compute key
-                const prk = Sha512.extract(state.salt, &shared_secret);
-                client.key = s_client.allocator.alloc(u8, 32) catch return error.Unrecoverable;
-                Sha512.expand(client.key, "session", prk);
-
-                client.status = .Established;
-                return error.NotAuthenticated;
-            } else {
-                sendUnsecureResp(s_client, parser.ResponseCodes.NotSecure) catch {
-                    return error.Unrecoverable;
-                };
-
-                return error.NotAuthenticated;
-            }
-        },
-        .Established => {
-            switch (@as(parser.Opcodes, @enumFromInt(msg[2]))) {
-                .Register => {
-                    const decrypted_msg = decrypt(s_client.allocator, client, msg) catch {
-                        sendSecureResp(
-                            s_client,
-                            client,
-                            state.nonce,
-                            parser.ResponseCodes.BadMessage,
-                        ) catch return error.Unrecoverable;
-
-                        return error.NotAuthenticated;
-                    };
-
-                    const register = parser.Register.parse(decrypted_msg) catch {
-                        sendSecureResp(
-                            s_client,
-                            client,
-                            state.nonce,
-                            parser.ResponseCodes.BadMessage,
-                        ) catch return error.Unrecoverable;
-
-                        return error.NotAuthenticated;
-                    };
-
-                    // hash plaintext password
-                    const params = std.crypto.pwhash.argon2.Params{
-                        .m = 19456, // Memory cost (16 MiB)
-                        .t = 2, // Time cost in iterations (3)
-                        .p = 1, // Threads (1)
-                    };
-
-                    const opts = std.crypto.pwhash.argon2.HashOptions{
-                        .allocator = s_client.allocator,
-                        .params = params,
-                        .encoding = .phc,
-                        .mode = .argon2id,
-                    };
-
-                    var buf: [120]u8 = undefined;
-                    const hash = std.crypto.pwhash.argon2.strHash(
-                        register.pwd_text,
-                        opts,
-                        &buf,
-                        state.io,
-                    ) catch return error.Unrecoverable;
-
-                    const user = state.db.addUser(s_client.allocator, register.handle, hash) catch |err| {
-                        if (err == error.StepError) {
-                            sendUnsecureResp(s_client, parser.ResponseCodes.InvalidCredentials) catch {
-                                return error.Unrecoverable;
-                            };
-                        }
-
-                        return error.NotAuthenticated;
-                    };
-
-                    client.status = .Authenticated;
-                    client.id = user.id;
-                    client.handle = user.handle;
-
-                    // respond with success
-                    sendSecureResp(
-                        s_client,
-                        client,
-                        state.nonce,
-                        parser.ResponseCodes.Success,
-                    ) catch {
-                        return error.Unrecoverable;
-                    };
-
-                    s_client.allocator.free(user.pwd_hash);
-
-                    return decrypted_msg;
-                },
-                .Authenticate => {
-                    const decrypted_msg = decrypt(s_client.allocator, client, msg) catch {
-                        sendSecureResp(
-                            s_client,
-                            client,
-                            state.nonce,
-                            parser.ResponseCodes.BadMessage,
-                        ) catch return error.Unrecoverable;
-
-                        return error.NotAuthenticated;
-                    };
-
-                    const authenticate = parser.Authenticate.parse(decrypted_msg) catch {
-                        sendSecureResp(
-                            s_client,
-                            client,
-                            state.nonce,
-                            parser.ResponseCodes.BadMessage,
-                        ) catch return error.Unrecoverable;
-
-                        return error.NotAuthenticated;
-                    };
-
-                    const user = state.db.getUser(s_client.allocator, authenticate.handle) catch {
-                        sendSecureResp(
-                            s_client,
-                            client,
-                            state.nonce,
-                            parser.ResponseCodes.InvalidCredentials,
-                        ) catch return error.Unrecoverable;
-
-                        return error.NotAuthenticated;
-                    };
-
-                    // hash passworrd
-                    Argon2.strVerify(
-                        user.pwd_hash,
-                        authenticate.pwd_text,
-                        .{ .allocator = s_client.allocator },
-                        state.io,
-                    ) catch |err| {
-                        if (err == error.AuthenticationFailed) {
-                            sendSecureResp(
-                                s_client,
-                                client,
-                                state.nonce,
-                                parser.ResponseCodes.InvalidCredentials,
-                            ) catch return error.Unrecoverable;
-
-                            return error.NotAuthenticated;
-                        } else {
-                            // TODO: error happened
-                            return error.Unrecoverable;
-                        }
-                    };
-
-                    client.status = .Authenticated;
-                    client.id = user.id;
-                    client.handle = user.handle;
-
-                    // respond with success
-                    sendSecureResp(
-                        s_client,
-                        client,
-                        state.nonce,
-                        parser.ResponseCodes.Success,
-                    ) catch {
-                        return error.Unrecoverable;
-                    };
-
-                    // free allocated fields in user
-                    s_client.allocator.free(user.pwd_hash);
-
-                    return decrypted_msg;
-                },
-                else => {
-                    sendSecureResp(
-                        s_client,
-                        client,
-                        state.nonce,
-                        parser.ResponseCodes.NotAuthenticated,
-                    ) catch return error.Unrecoverable;
-
-                    return error.NotAuthenticated;
-                },
-            }
-        },
-        .Authenticated => {
-            const decrypted_msg = decrypt(s_client.allocator, client, msg) catch {
-                sendSecureResp(
-                    s_client,
-                    client,
-                    state.nonce,
-                    parser.ResponseCodes.BadMessage,
-                ) catch return error.Unrecoverable;
-
-                return error.NotAuthenticated;
-            };
-
-            return decrypted_msg;
-        },
-    }
-}
-
-// Encryption and decryption helpers
-
-/// returns a message that is encrypted with nonce & tag prepended, header not included
-/// caller is responsible for freeing msg returned
-fn encrypt(allocator: Allocator, unencrypted_msg: []const u8, nonce: *u96, key: *[32]u8) ![]u8 {
-
-    // convert nonce to native endian
-    var nonce_buf: [12]u8 = undefined;
-    std.mem.writeInt(u96, &nonce_buf, nonce.*, .big);
-
-    var encrypted_msg: []u8 = try allocator.alloc(u8, unencrypted_msg.len + 28);
-    var tag: [16]u8 = undefined;
-
-    Chacha20.encrypt(encrypted_msg[28..], &tag, unencrypted_msg, &[_]u8{}, nonce_buf, key.*);
-
-    // convert tag to native endian
-    const ptr: *u128 = @ptrCast(@alignCast(&tag));
-    ptr.* = std.mem.nativeToBig(u128, ptr.*);
-
-    @memcpy(encrypted_msg[0..12], nonce_buf[0..]);
-    @memcpy(encrypted_msg[12..28], tag[0..]);
-
-    nonce.* += 1; // HACK: doesn't account for multi-threading
-    return encrypted_msg;
-}
-
-/// takes a encrypted msg with plaintext header and returns plaintext header and decrypted msg
-/// caller is responsible for freeing returned msg
-fn decrypt(allocator: Allocator, client: *Client, encrypted_msg: []u8) ![]u8 {
-    const decrypted_msg = try allocator.alloc(u8, encrypted_msg.len - 28);
-
-    var nonce: [12]u8 = encrypted_msg[6..18].*;
-    var tag: [16]u8 = encrypted_msg[18..34].*;
-
-    // convert nonce to native endian
-    const ptr: *u96 = @ptrCast(@alignCast(&nonce));
-    ptr.* = std.mem.bigToNative(u96, ptr.*);
-
-    // convert tag to native endian
-    const ptr2: *u128 = @ptrCast(@alignCast(&tag));
-    ptr2.* = std.mem.bigToNative(u128, ptr2.*);
-
-    @memcpy(decrypted_msg[0..6], encrypted_msg[0..6]);
-    try Chacha20.decrypt(decrypted_msg[6..], encrypted_msg[34..], tag, &[_]u8{}, nonce, client.key[0..32].*);
-
-    return decrypted_msg;
-}
-
 // Helpers to send error messages
-fn sendUnsecureResp(s_client: *server.Client, code: parser.ResponseCodes) !void {
+pub fn sendUnsecureResp(s_client: *server.Client, code: parser.ResponseCodes) !void {
     const code_num: u16 = @intFromEnum(code);
     var code_buf: [2]u8 = undefined;
 
@@ -454,7 +260,7 @@ fn sendUnsecureResp(s_client: *server.Client, code: parser.ResponseCodes) !void 
     try s_client.write(@intFromEnum(parser.Opcodes.Response), msg[0..]);
 }
 
-fn sendSecureResp(s_client: *server.Client, client: *Client, nonce: *u96, code: parser.ResponseCodes) !void {
+pub fn sendSecureResp(s_client: *server.Client, client: *Client, context: SecurityContext, code: parser.ResponseCodes) !void {
     const code_num: u16 = @intFromEnum(code);
     var code_buf: [2]u8 = undefined;
 
@@ -462,7 +268,7 @@ fn sendSecureResp(s_client: *server.Client, client: *Client, nonce: *u96, code: 
 
     const err_msg = [_]u8{ 0x01, 0x00, 0x05 } ++ code_buf;
 
-    const msg = try encrypt(s_client.allocator, err_msg[0..], nonce, client.key[0..32]);
+    const msg = try security.encrypt(s_client.allocator, err_msg[0..], context, client.key[0..32]);
 
     try s_client.write(@intFromEnum(parser.Opcodes.Response), msg);
 

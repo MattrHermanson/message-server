@@ -66,6 +66,7 @@ pub fn build(b: *std.Build) void {
     });
     server_module.addImport("net", net_module);
     server_module.addImport("kqueue", kqueue_module);
+    server_module.addImport("db", db_module);
 
     // ==========================================
     // Server Configuration
